@@ -30,6 +30,7 @@ public class TradingFeaturesTest {
         @Implementation protected static List<DailyBar> minutes(String code)throws Exception {if(entered!=null){entered.countDown();release.await(3,TimeUnit.SECONDS);}if(failMinutes)throw new IOException("测试离线");return behaviorBars();}
         @Implementation protected static TencentClient.Quote quote(String code){List<DailyBar> d=daily();DailyBar b=d.get(d.size()-1);return new TencentClient.Quote(code,"测试股票",b,10,MinuteBehavior.epoch(b.date+" 15:00")/1000);}
         @Implementation protected static List<DailyBar> history(String code,String date){return daily();}
+        @Implementation protected static List<DailyBar> history(String code,String date,int count){return daily();}
         @Implementation protected static List<TencentClient.Quote> quotes(List<String> codes){List<TencentClient.Quote> out=new ArrayList<>();for(String c:codes)out.add(quote(c));return out;}
     }
     @Before public void reset(){Context c=RuntimeEnvironment.getApplication();for(String pref:new String[]{"holdings","watchlist","minute_cache","minute15_cache","scan"})c.getSharedPreferences(pref,0).edit().clear().commit();failMinutes=false;entered=null;release=null;}

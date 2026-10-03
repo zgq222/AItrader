@@ -121,6 +121,9 @@ final class TencentClient {
     static List<DailyBar> history(String code,String throughDate)throws Exception {
         return historySymbol(symbol(code),throughDate);
     }
+    static List<DailyBar> history(String code,String throughDate,int count)throws Exception {
+        return historySymbol(symbol(code),throughDate,count);
+    }
     static List<DailyBar> minutes(String code)throws Exception {
         if(!code.matches("\\d{6}"))throw new IOException("股票代码无效");
         return parseMinutes(new String(get("https://ifzq.gtimg.cn/appstock/app/kline/mkline?param="+symbol(code)+",m15,,640"),StandardCharsets.UTF_8),symbol(code));
@@ -142,7 +145,10 @@ final class TencentClient {
         if(sorted.isEmpty())throw new IOException("15分钟K线为空或格式无效");return new ArrayList<>(sorted.values());
     }
     private static List<DailyBar> historySymbol(String key,String throughDate)throws Exception {
-        String uri="https://web.ifzq.gtimg.cn/appstock/app/kline/kline?param="+key+",day,,,120";
+        return historySymbol(key,throughDate,120);
+    }
+    private static List<DailyBar> historySymbol(String key,String throughDate,int count)throws Exception {
+        String uri="https://web.ifzq.gtimg.cn/appstock/app/kline/kline?param="+key+",day,,,"+count;
         JSONObject root=new JSONObject(new String(get(uri),StandardCharsets.UTF_8));
         JSONObject data=root.optJSONObject("data");JSONObject stock=data==null?null:data.optJSONObject(key);
         JSONArray rows=stock==null?null:stock.optJSONArray("day");

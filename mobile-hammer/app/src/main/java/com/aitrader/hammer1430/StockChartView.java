@@ -49,7 +49,7 @@ final class StockChartView extends View {
         scaleDetector=new ScaleGestureDetector(context,new ScaleGestureDetector.SimpleOnScaleGestureListener(){
             @Override public boolean onScale(ScaleGestureDetector detector){
                 if(bars.isEmpty())return false;
-                visible=Math.max(Math.min(18,bars.size()),Math.min(Math.min(120,bars.size()),Math.round(visible/detector.getScaleFactor())));
+                visible=Math.max(Math.min(18,bars.size()),Math.min(Math.min(minute?120:240,bars.size()),Math.round(visible/detector.getScaleFactor())));
                 end=Math.max(visible,Math.min(end,bars.size()));invalidate();return true;
             }
         });
@@ -71,6 +71,7 @@ final class StockChartView extends View {
         invalidate();if(listener!=null&&selected>=0)listener.onSelected(selected);
     }
     int[] viewport(){return new int[]{end,visible,selected,indicator};}
+    void setVisibleCount(int count){if(bars.isEmpty())return;visible=Math.max(1,Math.min(count,bars.size()));end=bars.size();selected=end-1;invalidate();if(listener!=null)listener.onSelected(selected);}
     void restoreViewport(int[] values){if(values==null||values.length!=4||bars.isEmpty())return;visible=Math.max(1,Math.min(values[1],bars.size()));end=Math.max(visible,Math.min(values[0],bars.size()));selected=Math.max(-1,Math.min(values[2],bars.size()-1));indicator=Math.max(0,Math.min(values[3],INDICATORS.length-1));invalidate();if(listener!=null&&selected>=0)listener.onSelected(selected);}
     void setMinuteMode(boolean value){minute=value;bars=new ArrayList<>();end=0;selected=-1;zones.clear();volumeBaselines.clear();behaviorLabels.clear();invalidate();}
     void setStopPrice(double value){stopPrice=value>0&&Double.isFinite(value)?value:Double.NaN;invalidate();}
@@ -132,14 +133,15 @@ final class StockChartView extends View {
             float yClose=scale(bar.close,min,max,priceTop,priceBottom);
             float yHigh=scale(bar.high,min,max,priceTop,priceBottom);
             float yLow=scale(bar.low,min,max,priceTop,priceBottom);
-            stroke(color,1);canvas.drawLine(x,yHigh,x,yLow,paint);
+            stroke(color,Math.min(1,slot*.6f/density));canvas.drawLine(x,yHigh,x,yLow,paint);
             fill(color);float body=Math.max(dp(1.5f),Math.abs(yOpen-yClose));
-            canvas.drawRect(x-Math.max(dp(1.2f),slot*.3f),Math.min(yOpen,yClose),
-                    x+Math.max(dp(1.2f),slot*.3f),Math.min(yOpen,yClose)+body,paint);
+            float halfWidth=Math.min(slot*.4f,Math.max(dp(.5f),slot*.3f));
+            canvas.drawRect(x-halfWidth,Math.min(yOpen,yClose),
+                    x+halfWidth,Math.min(yOpen,yClose)+body,paint);
             if(volumeMax>0&&Double.isFinite(bar.volume)){
                 float volumeHeight=(float)(bar.volume/volumeMax*(volumeBottom-volumeTop));
-                canvas.drawRect(x-Math.max(dp(1.2f),slot*.3f),volumeBottom-volumeHeight,
-                        x+Math.max(dp(1.2f),slot*.3f),volumeBottom,paint);
+                canvas.drawRect(x-halfWidth,volumeBottom-volumeHeight,
+                        x+halfWidth,volumeBottom,paint);
             }
         }
         canvas.save();canvas.clipRect(left,priceTop,right,priceBottom);

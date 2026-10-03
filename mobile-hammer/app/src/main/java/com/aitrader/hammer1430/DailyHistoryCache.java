@@ -28,10 +28,14 @@ final class DailyHistoryCache {
         return new ArrayList<>(byDate.values());
     }
     List<DailyBar> load(TencentClient.Quote quote,String latest)throws Exception{
-        File file=new File(directory,quote.code+".json");List<DailyBar> bars=null;
+        return load(quote,latest,120);
+    }
+    List<DailyBar> load(TencentClient.Quote quote,String latest,int historyCount)throws Exception{
+        File file=new File(directory,quote.code+".json");List<DailyBar> bars=null;int cachedHistoryCount=120;
         if(file.exists())try{
             JSONObject saved=new JSONObject(read(file));
-            if(latest.equals(saved.optString("through"))){
+            cachedHistoryCount=saved.optInt("history_count",120);
+            if(latest.equals(saved.optString("through"))&&(saved.optInt("history_count",120)>=historyCount||saved.getJSONArray("bars").length()>=historyCount)){
                 bars=new ArrayList<>();JSONArray values=saved.getJSONArray("bars");
                 for(int i=0;i<values.length();i++){
                     JSONArray row=values.getJSONArray(i);
@@ -40,14 +44,16 @@ final class DailyHistoryCache {
             }
         }catch(Exception ignored){bars=null;}
         if(bars==null){
-            bars=TencentClient.history(quote.code,latest);
+            // Keep an expanded stock history when another screen refreshes it next session.
+            historyCount=Math.max(historyCount,cachedHistoryCount);
+            bars=historyCount==120?TencentClient.history(quote.code,latest):TencentClient.history(quote.code,latest,historyCount);
             if(bars.isEmpty())throw new IOException(quote.code+" 日K为空");
             JSONArray values=new JSONArray();
             for(DailyBar bar:bars){JSONArray row=new JSONArray();
                 row.put(bar.date).put(bar.open).put(bar.high).put(bar.low).put(bar.close);
                 row.put(Double.isFinite(bar.volume)?bar.volume:JSONObject.NULL);values.put(row);
             }
-            JSONObject saved=new JSONObject();saved.put("through",latest).put("bars",values);
+            JSONObject saved=new JSONObject();saved.put("through",latest).put("history_count",historyCount).put("bars",values);
             File temp=File.createTempFile(quote.code+"-",".tmp",directory);
             try(FileOutputStream out=new FileOutputStream(temp)){out.write(saved.toString().getBytes(StandardCharsets.UTF_8));}
             try{java.nio.file.Files.move(temp.toPath(),file.toPath(),java.nio.file.StandardCopyOption.REPLACE_EXISTING,java.nio.file.StandardCopyOption.ATOMIC_MOVE);}

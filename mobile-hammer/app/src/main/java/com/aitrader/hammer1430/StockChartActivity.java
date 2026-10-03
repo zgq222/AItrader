@@ -18,6 +18,13 @@ import java.util.TreeMap;
 public final class StockChartActivity extends Activity implements TraderApplication.Refreshable {
     static final String EXTRA_CODE="stock_code",EXTRA_NAME="stock_name",EXTRA_MINUTE="open_minute",EXTRA_FOCUS="focus_bar_time";
     private final ArrayList<Button> indicatorButtons=new ArrayList<>();
+    private final ArrayList<Button> rangeButtons=new ArrayList<>();
+    private static final int[] DAILY_RANGES={30,60,120,240};
+    private LinearLayout dailyRanges;
+    private int dailyRange=60;
+    private int[] dailyViewport,minuteViewport;
+    // Fetch extra sessions to cover two calendar years, including data-source gaps.
+    private static final int DAILY_HISTORY_BARS=750;
     private TextView status,detail,priceLabel,changeLabel,stopLabel,selectedHeading;
     private LinearLayout behaviorBox;
     private Button dailyButton,minuteButton,holdingButton;
@@ -42,6 +49,7 @@ public final class StockChartActivity extends Activity implements TraderApplicat
         if(code==null||!code.matches("\\d{6}")){finish();return;}
         if(name==null||name.isEmpty())name=code;
         stockCode=code;stockName=name;minuteMode=state!=null?state.getBoolean("minute",false):getIntent().getBooleanExtra(EXTRA_MINUTE,false);restoredViewport=state==null?null:state.getIntArray("chart_viewport");focusTime=state==null?getIntent().getStringExtra(EXTRA_FOCUS):null;
+        if(state!=null){dailyRange=state.getInt("daily_range",60);dailyViewport=state.getIntArray("daily_viewport");minuteViewport=state.getIntArray("minute_viewport");}
         if(getIntent().getBooleanExtra("holding_risk",false))try{PersonalSignalStore.acknowledge(this,code);}catch(Exception ignored){}
         LinearLayout root=Ui.column(this);setContentView(root);Ui.install(this,root);
         ScrollView scroll=new ScrollView(this);scroll.setTag("chart-scroll");scroll.setFillViewport(true);root.addView(scroll,new LinearLayout.LayoutParams(-1,0,1));
@@ -87,6 +95,13 @@ public final class StockChartActivity extends Activity implements TraderApplicat
             button.setOnClickListener(view->{chart.setIndicator(chosen);selectIndicator(chosen);});
         }
         selectIndicator(0);
+        dailyRanges=Ui.row(this);dailyRanges.setTag("daily-ranges");dailyRanges.setPadding(dp(4),dp(4),dp(4),dp(4));dailyRanges.setBackground(Ui.shape(this,Ui.BG,12));
+        for(int count:DAILY_RANGES){
+            Button button=Ui.button(this,count+"日",false);button.setTag("daily-range:"+count);button.setSingleLine(true);button.setPadding(dp(4),dp(8),dp(4),dp(8));button.setAutoSizeTextTypeUniformWithConfiguration(10,13,1,android.util.TypedValue.COMPLEX_UNIT_SP);button.setContentDescription("查看最近"+count+"个交易日日K");
+            rangeButtons.add(button);dailyRanges.addView(button,new LinearLayout.LayoutParams(0,dp(44),1));
+            button.setOnClickListener(v->{dailyRange=count;restoredViewport=null;chart.setVisibleCount(count);updateRanges();});
+        }
+        Ui.gap(chartCard,8);Ui.add(chartCard,dailyRanges);updateRanges();
         chart=new StockChartView(this);chart.setMinimumHeight(dp(480));
         chartCard.addView(chart,new LinearLayout.LayoutParams(-1,dp(480)));
         LinearLayout selected=Ui.card(page);selectedHeading=text(minuteMode?"所选15分钟":"所选交易日",12);Ui.add(selected,selectedHeading);Ui.gap(selected,9);detail=text("点选K线查看当天数据",13);detail.setMinHeight(dp(72));Ui.add(selected,detail);
@@ -119,10 +134,17 @@ public final class StockChartActivity extends Activity implements TraderApplicat
         }
     }
     private void choosePeriod(boolean minute){
-        if(minuteMode==minute)return;generation++;loading=false;minuteMode=minute;chart.setMinuteMode(minute);selectedHeading.setText(minute?"所选15分钟":"所选交易日");detail.setText("点选K线查看数据");
-        Ui.segment(dailyButton,!minute);Ui.segment(minuteButton,minute);List<DailyBar> cached=minute?minuteRows:dailyRows;if(!cached.isEmpty())chart.setBars(cached);renderBehaviors();refreshData();
+        if(minuteMode==minute)return;rememberViewport();generation++;loading=false;minuteMode=minute;restoredViewport=minute?minuteViewport:dailyViewport;chart.setMinuteMode(minute);selectedHeading.setText(minute?"所选15分钟":"所选交易日");detail.setText("点选K线查看数据");
+        Ui.segment(dailyButton,!minute);Ui.segment(minuteButton,minute);updateRanges();List<DailyBar> cached=minute?minuteRows:dailyRows;if(!cached.isEmpty())showRows(cached);renderBehaviors();refreshData();
     }
-    @Override protected void onSaveInstanceState(Bundle state){if(orientation!=null)orientation.save(state);state.putBoolean("minute",minuteMode);if(chart!=null)state.putIntArray("chart_viewport",chart.viewport());super.onSaveInstanceState(state);}
+    private void updateRanges(){dailyRanges.setVisibility(minuteMode?View.GONE:View.VISIBLE);for(int i=0;i<rangeButtons.size();i++)Ui.segment(rangeButtons.get(i),dailyRange==DAILY_RANGES[i]);}
+    private void rememberViewport(){if(chart!=null&&chart.viewport()[0]>0){if(minuteMode)minuteViewport=chart.viewport();else dailyViewport=chart.viewport();}}
+    private void showRows(List<DailyBar> rows){
+        boolean first=chart.viewport()[0]==0;chart.setBars(rows);
+        if(restoredViewport!=null){chart.restoreViewport(restoredViewport);selectIndicator(restoredViewport[3]);restoredViewport=null;}
+        else if(first)chart.setVisibleCount(minuteMode?50:dailyRange);
+    }
+    @Override protected void onSaveInstanceState(Bundle state){if(orientation!=null)orientation.save(state);state.putBoolean("minute",minuteMode);rememberViewport();if(chart!=null)state.putIntArray("chart_viewport",restoredViewport!=null?restoredViewport:chart.viewport());state.putInt("daily_range",dailyRange);state.putIntArray("daily_viewport",dailyViewport);state.putIntArray("minute_viewport",minuteViewport);super.onSaveInstanceState(state);}
     @Override protected void onDestroy(){generation++;super.onDestroy();}
     private void updateStop(){if(chart==null||stockCode==null)return;try{
         org.json.JSONObject h=HoldingsStore.find(this,stockCode);double stop=h==null?Double.NaN:h.optDouble("stop_price",Double.NaN);chart.setStopPrice(stop);
@@ -148,11 +170,15 @@ public final class StockChartActivity extends Activity implements TraderApplicat
             if(rows==null||rows.isEmpty())try{rows=MinuteCache.load(this,code);source="本机缓存（更新失败）";}catch(Exception ignored){}
         }else{
             DailyHistoryCache cache=new DailyHistoryCache(this);
-            try{TencentClient.Quote q=TencentClient.quote(code);rows=cache.load(q,q.today.date);}catch(Exception e){failure=e;}
+            try{TencentClient.Quote q=TencentClient.quote(code);rows=cache.load(q,q.today.date,DAILY_HISTORY_BARS);}catch(Exception e){failure=e;}
             if(rows==null||rows.isEmpty())try{rows=cache.cached(code);source="本机缓存（更新失败）";}catch(Exception ignored){}
-            if(rows==null||rows.isEmpty())try{rows=TencentClient.history(code,"9999-12-31");source="腾讯历史日K";}catch(Exception e){failure=e;}
+            if(rows==null||rows.isEmpty())try{rows=TencentClient.history(code,"9999-12-31",DAILY_HISTORY_BARS);source="腾讯历史日K";}catch(Exception e){failure=e;}
         }
         TreeMap<String,DailyBar> sorted=new TreeMap<>();if(rows!=null)for(DailyBar b:rows)if(b.open>0&&b.high>0&&b.low>0&&b.close>0)sorted.put(b.date,b);
+        if(!minute&&!sorted.isEmpty()){
+            String start=java.time.LocalDate.parse(sorted.lastKey()).minusYears(2).toString();
+            sorted.headMap(start,false).clear();
+        }
         List<DailyBar> ready=new ArrayList<>(sorted.values());String label=source;Exception error=failure;
         runOnUiThread(()->{
             if(isFinishing()||isDestroyed()||request!=generation||minute!=minuteMode)return;
@@ -162,7 +188,7 @@ public final class StockChartActivity extends Activity implements TraderApplicat
             double base=minute?last.open:ready.size()>1?ready.get(ready.size()-2).close:Double.NaN;double change=(last.close/base-1)*100;
             changeLabel.setText(String.format(Locale.CHINA,"%s %+.2f%% · %s",minute?"本根涨跌":"日涨幅",change,last.date));changeLabel.setTextColor(change>=0?Ui.RED:Ui.GREEN);
             status.setText(label+" · "+last.date+" · "+ready.size()+"根"+(minute?"15分钟K线":"日K")+(minute&&MinuteBehavior.epoch(last.date)>System.currentTimeMillis()?" · 末根未结束":""));
-            chart.setBars(ready);if(restoredViewport!=null){chart.restoreViewport(restoredViewport);selectIndicator(restoredViewport[3]);restoredViewport=null;}else if(minute&&focusTime!=null){for(int i=0;i<ready.size();i++)if(focusTime.equals(ready.get(i).date)){chart.focus(i);break;}focusTime=null;}updateStop();renderBehaviors();
+            showRows(ready);if(minute&&focusTime!=null){for(int i=0;i<ready.size();i++)if(focusTime.equals(ready.get(i).date)){chart.focus(i);break;}focusTime=null;}updateStop();renderBehaviors();
         });
     }
 }
