@@ -31,6 +31,8 @@ public class TradingFeaturesTest {
         @Implementation protected static TencentClient.Quote quote(String code){List<DailyBar> d=daily();DailyBar b=d.get(d.size()-1);return new TencentClient.Quote(code,"测试股票",b,10,MinuteBehavior.epoch(b.date+" 15:00")/1000);}
         @Implementation protected static List<DailyBar> history(String code,String date){return daily();}
         @Implementation protected static List<DailyBar> history(String code,String date,int count){return daily();}
+        @Implementation protected static List<DailyBar> indexHistory(String date){return daily();}
+        @Implementation protected static TencentClient.Quote indexQuote(){return quote("600519");}
         @Implementation protected static List<TencentClient.Quote> quotes(List<String> codes){List<TencentClient.Quote> out=new ArrayList<>();for(String c:codes)out.add(quote(c));return out;}
     }
     @Before public void reset(){Context c=RuntimeEnvironment.getApplication();for(String pref:new String[]{"holdings","watchlist","minute_cache","minute15_cache","scan"})c.getSharedPreferences(pref,0).edit().clear().commit();failMinutes=false;entered=null;release=null;}

@@ -20,6 +20,7 @@ final class PersonalSignalRepository {
         row.put("previous_date",prior.previousDate).put("previous_known",prior.previous!=null).put("previous_bearish",prior.bearish()).put("previous_falling",prior.falling()).put("previous_eligible",prior.eligible()).put("qualifies",false).put("qualifies_single",false).put("reductions",new JSONArray()).put("minute_fresh",false);
         if(prior.previous!=null)row.put("previous_open",prior.previous.open).put("previous_close",prior.previous.close);
         if(prior.beforePrevious!=null)row.put("comparison_close",prior.beforePrevious.close).put("comparison_date",prior.beforePrevious.date);
+        if(watched)row.put("risk_ratio",RiskRatio.calculate(daily,calendar,quote));
         if(!held&&!prior.eligible()){row.put("error",dailyError);return row;}
         List<DailyBar> minutes=TencentClient.minutes(code);MinuteCache.save(c,code,minutes);
         PersonalSignalRule.Decision signal=PersonalSignalRule.evaluate(daily,calendar,minutes,now);

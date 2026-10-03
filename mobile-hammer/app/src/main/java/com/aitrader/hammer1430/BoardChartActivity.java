@@ -62,6 +62,7 @@ public final class BoardChartActivity extends Activity implements TraderApplicat
         LinearLayout page=new LinearLayout(this);page.setOrientation(LinearLayout.VERTICAL);page.setPadding(dp(16),dp(12),dp(16),dp(18));
         scroll.addView(page);LinearLayout nav=Ui.row(this);Ui.Icon back=Ui.iconButton(this,"back",concept?"返回股票列表":"返回行业列表");back.setOnClickListener(v->finish());nav.addView(back,new LinearLayout.LayoutParams(dp(44),dp(44)));
         TextView caption=label(concept?"概念板块":"行业板块",14);caption.setPadding(dp(10),0,0,0);nav.addView(caption,new LinearLayout.LayoutParams(0,-2,1));nav.addView(orientation.button(),new LinearLayout.LayoutParams(dp(64),dp(44)));nav.setPadding(dp(16),dp(12),dp(16),0);root.addView(nav,0,new LinearLayout.LayoutParams(-1,-2));Ui.gap(page,6);
+        nav.addView(NotesDialogs.button(this,NotesStore.board(industry,concept),industry,null,()->{}),2,new LinearLayout.LayoutParams(dp(48),dp(44)));
         add(page,label(industry,28));Ui.gap(page,8);
         if(concept)try{ConceptCatalog catalog=new ConceptCatalog(this);catalog.update(this);JSONObject rank=catalog.rank(industry);add(page,label((rank==null?industry:catalog.tagText(rank))+" · 排名行情日 "+catalog.tradeDate()+" · 成员快照 "+catalog.memberDates.optString(industry,"—"),12));Ui.gap(page,8);}catch(Exception ignored){}
         source=label("正在读取内置板块行情…",13);add(page,source);

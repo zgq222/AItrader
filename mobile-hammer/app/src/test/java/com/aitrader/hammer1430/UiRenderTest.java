@@ -83,6 +83,7 @@ public class UiRenderTest {
         tab("自选股");assertNotNull(named(appRoot(),stock.getString("name")));capture("apk-v1.16-watchlist.png",390,844);
         assertNull(description(appRoot(),"5分钟选股"));assertNull(description(appRoot(),"30日涨幅"));
         description(appRoot(),stock.getString("name")+"加入持仓").performClick();Shadows.shadowOf(Looper.getMainLooper()).idle();
+        org.robolectric.shadows.ShadowAlertDialog.getLatestAlertDialog().getButton(-1).performClick();Shadows.shadowOf(Looper.getMainLooper()).idle();
         assertNotNull(HoldingsStore.find(activity,stock.getString("code")));tab("持仓股");assertNotNull(named(appRoot(),stock.getString("name")));
         description(appRoot(),stock.getString("name")+"设置止损线").performClick();Shadows.shadowOf(Looper.getMainLooper()).idle();android.app.AlertDialog stop=org.robolectric.shadows.ShadowAlertDialog.getLatestAlertDialog();
         EditText input=findInput(stop.getWindow().getDecorView());assertNotNull(input);input.setText("2.345");stop.getButton(-1).performClick();assertTrue(stop.isShowing());assertNotNull(input.getError());
@@ -128,7 +129,7 @@ public class UiRenderTest {
         for(int i=0;i<tags.getChildCount();i++){assertEquals(catalog.tagText(expected.get(i)),((TextView)tags.getChildAt(i)).getText().toString());assertEquals(tags.getChildAt(0).getTop(),tags.getChildAt(i).getTop());}
         capture("apk-v1.22-concept-watchlist.png",390,844);RuntimeEnvironment.setFontScale(1.3f);capture("apk-v1.22-concept-compact.png",320,720);assertEquals(1,((TextView)identity.getChildAt(1)).getLineCount());assertEquals(1,((TextView)identity.getChildAt(2)).getLineCount());RuntimeEnvironment.setFontScale(1f);
         tags.getChildAt(0).performClick();Intent opened=Shadows.shadowOf(activity).getNextStartedActivity();assertEquals(BoardChartActivity.class.getName(),opened.getComponent().getClassName());assertEquals("concept",opened.getStringExtra(BoardChartActivity.EXTRA_TYPE));assertEquals(expected.get(0).getString("name"),opened.getStringExtra(BoardChartActivity.EXTRA_INDUSTRY));
-        description(row,"丽珠集团加入持仓").performClick();Shadows.shadowOf(Looper.getMainLooper()).idle();tab("持仓股");assertNotNull(appRoot().findViewWithTag("concept-tags:000513"));assertNotNull(description(appRoot(),"丽珠集团设置止损线"));capture("apk-v1.22-concept-holdings.png",390,844);
+        description(row,"丽珠集团加入持仓").performClick();Shadows.shadowOf(Looper.getMainLooper()).idle();org.robolectric.shadows.ShadowAlertDialog.getLatestAlertDialog().getButton(-1).performClick();Shadows.shadowOf(Looper.getMainLooper()).idle();tab("持仓股");assertNotNull(appRoot().findViewWithTag("concept-tags:000513"));assertNotNull(description(appRoot(),"丽珠集团设置止损线"));capture("apk-v1.22-concept-holdings.png",390,844);
     }
     @Test public void rulesAndFailureKeepPrices()throws Exception{
         description(appRoot(),"查看规则与刷新说明").performClick();

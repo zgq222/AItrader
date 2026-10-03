@@ -88,6 +88,7 @@ final class Ui {
                 case "stocks":canvas.drawCircle(10,10,6.5f,paint);p.moveTo(15,15);p.lineTo(21,21);p.moveTo(7,11);p.lineTo(9,8);p.lineTo(12,10);break;
                 case "gain":p.moveTo(4,19);p.lineTo(4,13);p.moveTo(10,19);p.lineTo(10,9);p.moveTo(16,19);p.lineTo(16,5);p.moveTo(3,20);p.lineTo(21,20);break;
                 case "holdings":canvas.drawRoundRect(3,7,21,21,2,2,paint);canvas.drawRoundRect(8,3,16,7,1,1,paint);p.moveTo(3,12);p.lineTo(21,12);p.moveTo(10,12);p.lineTo(14,12);break;
+                case "review":canvas.drawRoundRect(5,3,19,21,2,2,paint);p.moveTo(8,8);p.lineTo(16,8);p.moveTo(8,12);p.lineTo(16,12);p.moveTo(8,16);p.lineTo(13,16);break;
                 case "star":for(int i=0;i<10;i++){double a=-Math.PI/2+i*Math.PI/5;float r=i%2==0?9:4.3f;float x=12+(float)Math.cos(a)*r,y=12+(float)Math.sin(a)*r;if(i==0)p.moveTo(x,y);else p.lineTo(x,y);}p.close();break;
                 default:p.moveTo(3,17);p.lineTo(8,12);p.lineTo(12,15);p.lineTo(21,5);p.moveTo(16,5);p.lineTo(21,5);p.lineTo(21,10);
             }

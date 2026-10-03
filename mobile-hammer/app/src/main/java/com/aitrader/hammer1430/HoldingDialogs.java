@@ -7,6 +7,14 @@ import org.json.JSONObject;
 import java.util.Locale;
 
 final class HoldingDialogs {
+    static void add(Activity a,String code,String name,String industry,Runnable changed){transition(a,code,name,industry,false,changed);}
+    static void remove(Activity a,String code,String name,Runnable changed){transition(a,code,name,"",true,changed);}
+    private static void transition(Activity a,String code,String name,String industry,boolean remove,Runnable changed){
+        LinearLayout content=Ui.column(a);content.setPadding(Ui.dp(a,24),Ui.dp(a,8),Ui.dp(a,24),Ui.dp(a,8));Ui.add(content,Ui.text(a,remove?"移出后清除止损线，历史笔记和买卖逻辑继续保留。":"买入逻辑可留空，加入后也可以继续追加。",13,Ui.SECONDARY,false));
+        EditText input=new EditText(a);input.setInputType(InputType.TYPE_CLASS_TEXT|InputType.TYPE_TEXT_FLAG_MULTI_LINE);input.setMinLines(3);input.setMaxLines(6);input.setHint((remove?"卖出":"买入")+"逻辑（选填）");Ui.add(content,input);
+        AlertDialog dialog=new AlertDialog.Builder(a).setTitle(name+" · "+(remove?"移出持仓":"加入持仓")).setView(content).setNegativeButton("取消",null).setPositiveButton(remove?"确认移出":"确认加入",null).create();dialog.setOnShowListener(d->dialog.getButton(-1).setOnClickListener(v->{try{if(remove)HoldingsStore.remove(a,code,input.getText().toString());else HoldingsStore.add(a,code,name,industry,input.getText().toString());dialog.dismiss();changed.run();Toast.makeText(a,remove?"已移出持仓，记录已保留":"已加入持仓",Toast.LENGTH_SHORT).show();}catch(Exception e){input.setError(e.getMessage());}}));dialog.show();
+    }
+    static void manage(Activity a,String code,String name,Runnable changed){new AlertDialog.Builder(a).setTitle(name+" · 持仓管理").setItems(new String[]{"设置止损线","买入/卖出逻辑","移出持仓"},(d,which)->{if(which==0)editStop(a,code,changed);else if(which==1)NotesDialogs.journal(a,code,name,changed);else remove(a,code,name,changed);}).setNegativeButton("取消",null).show();}
     static void editStop(Activity a,String code,Runnable changed){try {
         JSONObject item=HoldingsStore.find(a,code);if(item==null)return;
         LinearLayout content=Ui.column(a);content.setPadding(Ui.dp(a,24),Ui.dp(a,8),Ui.dp(a,24),Ui.dp(a,8));
