@@ -12,6 +12,20 @@
 - 分时板块资金流视频生成
 - 本地量化回测报告库
 
+## 工作台概念轮动
+
+个股工作台新增“概念轮动·主板非ST”，与行业板块轮动使用相同的共享交易日历、全市场等权基准及四项排名百分位评分：5日/20日相对强度、5日跑赢市场比例、站上MA20比例等权平均，强度与广度各50%。缺项不补零，四项齐全才评分。概念内保留全部沪深主板非ST成员，按最近30个交易日最低日K低点至最新收盘价涨幅降序，缺行情置后。一只股票可在多个概念出现，市场基准仍只计算一次。
+
+当前覆盖293个同花顺概念。成员采用开盘红/levistock提供的2026-09-30日期快照，保存在`板块/成分股/concept`；点击分组刷新按钮补齐缺失或过期快照并重算排名。网页读取时按本地行情变化更新分组。点击概念查看本地同花顺日K、与大盘合并图、强度与广度历史、资金净额及分钟K线；缺失资金或分钟行情留空并说明。历史使用当前成员回看，不视为历史时点成分股回测。
+
+新增`/api/concept-rotation/refresh`、`/api/board/concept-strength-history`及`/api/board/concept-flow-history`。验证：`python -m unittest test_concept_rotation test_industry_strength test_sector_rotation test_industry_board_summary`与`node --test test_watchlist_frontend.js test_board_minute_frontend.js`。
+
+## 手机端工程
+
+Android原生工程位于`mobile-hammer/`，包含市场总览、行业轮动、自选股、持仓股与双层自选延伸；行业和概念图显示日K、强度及广度，个股支持日K和15分钟K线。K线页面默认竖屏，图表标题旁可点击“横屏查看”，顶部操作栏在滚动时保持可见。具体版本及规则见`mobile-hammer/README.md`。
+
+工程使用Android Gradle Plugin 8.7.3、Gradle 8.9、Java 17及Android SDK 35，最低Android 8.0（API 26）。安装相应工具后，在`mobile-hammer/`运行`gradle :app:testDebugUnitTest :app:assembleDebug :app:lintDebug`。源码保留内置分类、板块快照及测试资源；本机SDK路径、签名密钥、构建产物和动态行情缓存留在本机。
+
 ## 环境
 
 - Python 3.10+

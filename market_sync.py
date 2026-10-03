@@ -174,7 +174,8 @@ def _read_csv(path: Path) -> pd.DataFrame:
 
 def _stock_files() -> dict[str, tuple[str, Path, Path]]:
     result: dict[str, tuple[str, Path, Path]] = {}
-    for raw in RAW_DIR.glob("*_原始数据.csv"):
+    # Renamed stocks can have multiple files; the latest file carries the current ST name.
+    for raw in sorted(RAW_DIR.glob("*_原始数据.csv"), key=lambda path: (path.stat().st_mtime_ns, path.name)):
         match = re.match(r"^(\d{6})_(.+?)_原始数据\.csv$", raw.name)
         if not match:
             continue
@@ -217,33 +218,46 @@ def _fetch_free_daily(code: str, start_date: str, end_date: str) -> pd.DataFrame
     raise RuntimeError("; ".join(errors))
 
 
-def sync_stock_daily(max_stocks: int = 0, delay_seconds: float = 0.12) -> dict:
-    """以 AKShare 增量补齐本地日线；0 表示全部已有股票。"""
+def sync_stock_daily(max_stocks: int = 0, delay_seconds: float = 0.12,
+                     target_date: date | None = None) -> dict:
+    """以 AKShare 增量补齐本地日线；主板非ST优先，0 表示全部已有股票。"""
+    from watchlist_service import _latest_row, stock_update_sort_key
     files = _stock_files()
-    target = _expected_trade_date()
+    target = target_date or _expected_trade_date()
     candidates: list[tuple[str, str, Path, Path, date]] = []
+    already_current = 0
     for code, (name, raw_path, indicator_path) in files.items():
         try:
-            raw = _standardize_history(_read_csv(raw_path))
-            last = raw["date"].max().date()
+            latest = _latest_row(raw_path)
+            last = date.fromisoformat(str(latest["date"])[:10])
             if last < target:
                 candidates.append((code, name, raw_path, indicator_path, last))
+            else:
+                already_current += 1
         except Exception:
             candidates.append((code, name, raw_path, indicator_path, date(1990, 1, 1)))
+    candidates.sort(key=lambda item: stock_update_sort_key(item[0], item[1]))
     if max_stocks > 0:
         candidates = candidates[:max_stocks]
 
     total, updated, failed = len(candidates), 0, 0
     recent_errors: list[str] = []
-    print(f"[同步] 个股日线待更新: {total} / 已检查本地股票: {len(files)} / 目标日期: {target.isoformat()}", flush=True)
+    priority_count = sum(stock_update_sort_key(code, name)[0] == 0 for code, name, *_ in candidates)
+    print(f"[同步] 个股日线待更新: {total}（主板非ST优先 {priority_count} 只） / 已检查本地股票: {len(files)} / 目标日期: {target.isoformat()}", flush=True)
     for index, (code, _name, raw_path, indicator_path, last) in enumerate(candidates, 1):
         _write_status(current_step=f"更新个股日线 {code}", progress={"completed": index - 1, "total": total, "failed": failed})
         try:
             start = (last + timedelta(days=1)).strftime("%Y%m%d")
             fetched = _fetch_free_daily(code, start, target.strftime("%Y%m%d"))
             if fetched is None or fetched.empty:
-                continue
+                raise ValueError(f"行情源未返回 {start} 之后的日K")
             fresh = _standardize_history(fetched)
+            # 行情源发布存在延迟（节假日、接口缓存或盘后尚未更新时尤其常见）。
+            # 只要返回了 last 之后的新数据就先落库；不能因为目标日期尚未发布，
+            # 把本来有效的增量数据整只股票判为失败。
+            fresh = fresh[fresh["date"].dt.date > last].copy()
+            if fresh.empty:
+                raise ValueError(f"行情源暂无 {start} 之后的新日K（最新本地日期 {last.isoformat()}）")
             old = _standardize_history(_read_csv(raw_path))
             combined = pd.concat([old, fresh], ignore_index=True).drop_duplicates(subset=["date"], keep="last").sort_values("date")
             combined["date"] = combined["date"].dt.strftime("%Y-%m-%d")
@@ -267,7 +281,9 @@ def sync_stock_daily(max_stocks: int = 0, delay_seconds: float = 0.12) -> dict:
                     flush=True,
                 )
             time.sleep(delay_seconds)
-    return {"target_date": target.isoformat(), "checked": len(files), "updated": updated, "failed": failed}
+    return {"target_date": target.isoformat(), "checked": len(files), "updated": updated,
+            "already_current": already_current, "target_current": already_current + updated,
+            "failed": failed}
 
 
 def _save_snapshot(df: pd.DataFrame, directory: Path, prefix: str, trade_date: date) -> Path:
@@ -430,7 +446,9 @@ def _read_schedule_state() -> dict:
 
 def get_daily_schedule_status() -> dict:
     midday = os.getenv("AITRADER_MIDDAY_SYNC_TIME", "11:35").strip()
-    evening = os.getenv("AITRADER_EVENING_SYNC_TIME", "18:00").strip()
+    configured_evening = _parse_schedule_time("AITRADER_EVENING_SYNC_TIME", "16:30")
+    evening_hour, evening_minute = max(configured_evening, (16, 30))
+    evening = f"{evening_hour:02d}:{evening_minute:02d}"
     return {**_read_schedule_state(), "enabled": os.getenv("AITRADER_DAILY_SCHEDULE", "1").strip().lower() not in {"0", "false", "no"}, "midday_time": midday, "evening_time": evening}
 
 
@@ -476,23 +494,54 @@ def _run_evening_scheduled_sync(target: date) -> None:
         _write_schedule_state(state="running", last_job="evening", started_at=_now(), message="晚间全部数据更新中")
         print(f"[定时] {target} 晚间全部数据更新启动", flush=True)
         try:
-            mainflow = sync_board_mainflow_intraday(target, force_refresh=True)
             already_current = get_sync_status().get("last_completed_trade_date") == target.isoformat()
-            full = {"state": "completed", "source": "startup_sync"} if already_current else run_free_sync()
+            full = {"state": "completed", "source": "startup_sync"} if already_current else run_free_sync(target_date=target)
             if full.get("state") == "already_running":
                 raise RuntimeError("已有完整同步正在运行，稍后自动重试")
             if full.get("state") != "completed":
                 raise RuntimeError(str(full.get("error") or "完整同步未完成"))
-            _write_schedule_state(state="completed", last_evening_date=target.isoformat(), finished_at=_now(), result={"mainflow": mainflow, "full": full.get("state")}, message="晚间全部数据更新完成")
+            if get_sync_status().get("last_completed_trade_date") != target.isoformat():
+                raise RuntimeError(f"日K尚未完成 {target.isoformat()} 更新，晚间任务不记为完成")
+            # 东财板块分时接口偶尔整体断连；它不能阻止个股日K及后续选股更新。
+            try:
+                mainflow = sync_board_mainflow_intraday(target, force_refresh=True)
+            except Exception as exc:
+                mainflow = {"state": "failed", "error": str(exc)[:180]}
+                print(f"[定时] 板块分时资金更新失败，日K已完成：{str(exc)[:180]}", flush=True)
+            from watchlist_service import screen_daily_limitups
+            screened = screen_daily_limitups()
+            screen_meta = screened.get("daily_screen", {})
+            from watchlist_service import screen_main_board_30d_top150
+            main_board_30d = screen_main_board_30d_top150()
+            from stock_industry_service import save_industry_map
+            save_industry_map()
+            from inverted_hammer_service import scan_all as scan_inverted_hammers
+            hammer = scan_inverted_hammers()
+            from rising_structure_service import scan_all as scan_rising_structure
+
+            rising_structure = scan_rising_structure()
+            from scan_chan_fractals import DEFAULT_OUTPUT, scan as scan_chan_fractals
+            scan_chan_fractals(DEFAULT_OUTPUT)
+            hammer_meta = {"recent_trade_dates": hammer.get("recent_trade_dates", []),
+                           "stock_count": hammer.get("stock_count", 0)}
+            _write_schedule_state(state="completed", last_evening_date=target.isoformat(),
+                                  next_evening_retry_at=None, finished_at=_now(),
+                                  result={"mainflow": mainflow, "full": full.get("state"),
+                                          "daily_watchlist": screen_meta, "inverted_hammer": hammer_meta,
+                                          "main_board_30d": main_board_30d,
+                                          "rising_structure": rising_structure},
+                                  message=f"晚间全部数据更新完成；观察池累计 {screen_meta.get('count', 0)} 只，上涨结构与倒垂线分组已更新")
             print(f"[定时] {target} 晚间全部数据更新完成", flush=True)
         except Exception as exc:
-            _write_schedule_state(state="failed", finished_at=_now(), message=f"晚间更新失败：{str(exc)[:180]}")
+            retry_at = (datetime.now() + timedelta(minutes=30)).isoformat(timespec="seconds")
+            _write_schedule_state(state="failed", finished_at=_now(), next_evening_retry_at=retry_at,
+                                  message=f"晚间更新失败：{str(exc)[:180]}；30分钟后重试")
             print(f"[定时] 晚间全部数据更新失败：{str(exc)[:180]}", flush=True)
 
 
 def _run_daily_scheduler() -> None:
     midday_hour, midday_minute = _parse_schedule_time("AITRADER_MIDDAY_SYNC_TIME", "11:35")
-    evening_hour, evening_minute = _parse_schedule_time("AITRADER_EVENING_SYNC_TIME", "18:00")
+    evening_hour, evening_minute = max(_parse_schedule_time("AITRADER_EVENING_SYNC_TIME", "16:30"), (16, 30))
     print(f"[定时] 每日更新已启动：午盘 {midday_hour:02d}:{midday_minute:02d}，全部 {evening_hour:02d}:{evening_minute:02d}", flush=True)
     while True:
         now = datetime.now()
@@ -504,7 +553,12 @@ def _run_daily_scheduler() -> None:
             midday_due = current >= (midday_hour, midday_minute)
             # After the evening threshold, the full job includes the day's complete flow,
             # so a missed midday job is not run redundantly.
-            if evening_due and state.get("last_evening_date") != today.isoformat():
+            retry_at = state.get("next_evening_retry_at")
+            try:
+                retry_due = not retry_at or now >= datetime.fromisoformat(retry_at)
+            except (TypeError, ValueError):
+                retry_due = True
+            if evening_due and retry_due and state.get("last_evening_date") != today.isoformat():
                 if not (_thread and _thread.is_alive()):
                     _run_evening_scheduled_sync(today)
             elif midday_due and state.get("last_midday_date") != today.isoformat():
@@ -615,6 +669,7 @@ ASSET_SOURCES = {
     "wti": {"name": "WTI 美油（NYMEX）", "symbol": "CL", "file": "WTI美油_NYMEX.csv"},
     "bitcoin": {"name": "比特币（BTC）", "symbol": "BTC", "file": "比特币_BTC.csv"},
 }
+VIX_FILE = ASSET_DIR / "VIX_CBOE_30日预期波动率.csv"
 FX_FILE = FX_DIR / "中日美韩汇率.csv"
 
 
@@ -717,6 +772,28 @@ def sync_global_assets_and_fx() -> dict:
         except Exception as exc:
             results[key] = {"state": "failed", "error": str(exc)[:160]}
             print(f"[同步] {config['name']}: 失败，{str(exc)[:160]}", flush=True)
+    try:
+        # FRED 的 VIXCLS 为 Cboe VIX 每日收盘值；原始交易日保留，A股可用日由展示端按下一交易日映射。
+        frame = pd.read_csv("https://fred.stlouisfed.org/graph/fredgraph.csv?id=VIXCLS")
+        frame = frame.rename(columns={"observation_date": "date", "DATE": "date", "VIXCLS": "close"})
+        frame["date"] = pd.to_datetime(frame["date"], errors="coerce")
+        frame["close"] = pd.to_numeric(frame["close"], errors="coerce")
+        frame = frame.dropna(subset=["date", "close"]).drop_duplicates("date", keep="last").sort_values("date")
+        frame["change_pct"] = frame["close"].pct_change(fill_method=None).mul(100).round(4)
+        frame["ma5"] = frame["close"].rolling(5, min_periods=1).mean().round(4)
+        frame["ma20"] = frame["close"].rolling(20, min_periods=1).mean().round(4)
+        frame["risk_level"] = pd.cut(
+            frame["close"], bins=[float("-inf"), 15, 20, 30, 40, float("inf")],
+            labels=["极低波动", "平稳", "风险升温", "高风险", "极端波动"], right=False,
+        ).astype(str)
+        frame["date"] = frame["date"].dt.strftime("%Y-%m-%d")
+        frame.to_csv(VIX_FILE, index=False, encoding="utf-8-sig")
+        archive_csv_to_database(VIX_FILE, force=True)
+        results["vix"] = {"state": "ok", "rows": len(frame), "path": str(VIX_FILE.relative_to(BASE_DIR)), "source": "FRED（Cboe VIXCLS）", "from": frame.iloc[0]["date"], "to": frame.iloc[-1]["date"]}
+        print(f"[同步] Cboe VIX: 完成，{len(frame)} 条", flush=True)
+    except Exception as exc:
+        results["vix"] = {"state": "failed", "error": str(exc)[:160]}
+        print(f"[同步] Cboe VIX: 失败，{str(exc)[:160]}", flush=True)
     try:
         # FRED 三条序列均为“1 美元可兑换多少本币”，直接保留该统一方向。
         # 分三次读取，避免网络代理截断合并后的较大 CSV 响应。
@@ -1201,15 +1278,26 @@ def rebuild_lhb_event_index() -> dict:
     return {"rows": len(events), "ziyang_events": int(events["紫阳东路参与"].sum()), "path": str(LHB_EVENT_INDEX)}
 
 
-def run_free_sync(max_stocks: int = 0) -> dict:
+def run_free_sync(max_stocks: int = 0, target_date: date | None = None) -> dict:
     """执行一次完整免费同步，异常写入状态而不会令 Web 服务退出。"""
     if not _acquire_lock():
         print("[同步] 已有同步任务运行，跳过重复启动。", flush=True)
         return {"state": "already_running"}
-    target = _expected_trade_date()
+    target = target_date or _expected_trade_date()
     print(f"[同步] 免费自动同步启动，目标收盘日: {target.isoformat()}", flush=True)
     _write_status(state="running", started_at=_now(), finished_at=None, current_step="准备同步", message="免费数据同步中")
     try:
+        # 日K是工作台的基础数据，先更新它，再执行耗时的其他数据源。
+        stocks = sync_stock_daily(max_stocks=max_stocks, target_date=target)
+        required_current = max(1, -(-stocks["checked"] * 95 // 100))
+        if max_stocks == 0 and stocks["target_current"] < required_current:
+            raise RuntimeError(
+                f"个股日K仅 {stocks['target_current']}/{stocks['checked']} 只更新到 {target.isoformat()}，"
+                f"低于95%完成阈值；失败 {stocks['failed']} 只"
+            )
+        if max_stocks == 0:
+            _write_status(last_completed_trade_date=target.isoformat(),
+                          message=f"{target.isoformat()} 个股日K已更新 {stocks['target_current']}/{stocks['checked']} 只；其他数据继续同步")
         snapshots = sync_free_snapshots()
         lhb = sync_lhb_data(target)
         board_klines = sync_ths_board_klines()
@@ -1220,7 +1308,6 @@ def run_free_sync(max_stocks: int = 0) -> dict:
         futures = sync_cffex_positions()
         financials = sync_cached_financial_reports()
         members = sync_board_members()
-        stocks = sync_stock_daily(max_stocks=max_stocks)
         _write_status(
             state="completed", finished_at=_now(), last_completed_trade_date=target.isoformat(),
             current_step=None, datasets={**snapshots, "lhb": lhb, "board_klines": board_klines, "indices": indices, "index_members": index_members, "yield_curves": yields, "global_assets": global_assets, "cffex_positions": futures, "financial_reports": financials, "board_members": members}, message="免费同步完成；所有可增量数据均已合并写入本地存档",

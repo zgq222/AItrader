@@ -13,6 +13,7 @@ import os
 import re
 from datetime import datetime, timedelta
 import time
+from watchlist_service import stock_update_sort_key
 
 def clean_filename(name):
     """清理文件名中的非法字符"""
@@ -200,6 +201,11 @@ def main():
         stock_list = pd.read_csv(stock_list_path)
         print(f"已加载股票列表: {len(stock_list)} 只股票")
     
+    stock_order = sorted(stock_list.index, key=lambda index: stock_update_sort_key(
+        stock_list.at[index, 'code'], stock_list.at[index, 'name']))
+    stock_list = stock_list.loc[stock_order].reset_index(drop=True)
+    print("日K更新顺序：主板非ST优先，其余股票随后更新")
+
     # 读取已处理记录
     processed_file = os.path.join(base_dir, "已处理股票.txt")
     processed_stocks = set()

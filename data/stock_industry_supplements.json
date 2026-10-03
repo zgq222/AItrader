@@ -1,0 +1,11 @@
+{
+  "description": "补充本地行业成分股缓存缺失的股票；优先使用更新后的成分股快照。环保设备Ⅱ统一到现有环保设备板块。",
+  "stocks": {
+    "002084": {"industry": "家居用品", "industry_date": "2026-09-29", "industry_source": "https://basic.10jqka.com.cn/002084/"},
+    "002445": {"industry": "通用设备", "industry_date": "2026-09-29", "industry_source": "https://basic.10jqka.com.cn/002445/"},
+    "002906": {"industry": "汽车零部件", "industry_date": "2026-09-29", "industry_source": "https://basic.10jqka.com.cn/002906/"},
+    "300176": {"industry": "汽车零部件", "industry_date": "2026-09-29", "industry_source": "https://basic.10jqka.com.cn/300176/"},
+    "300862": {"industry": "环保设备", "industry_date": "2026-09-29", "industry_source": "https://basic.10jqka.com.cn/300862/"},
+    "600984": {"industry": "工程机械", "industry_date": "2026-09-29", "industry_source": "https://basic.10jqka.com.cn/600984/"}
+  }
+}

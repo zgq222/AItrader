@@ -4,19 +4,42 @@ import hashlib
 import re
 import math
 import socket
+import signal
 import subprocess
+import sys
 import tempfile
 import time
+import threading
 import pandas as pd
 import requests
 from concurrent.futures import ThreadPoolExecutor
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import urlparse, parse_qs
 from pathlib import Path
+from datetime import datetime
+from uuid import uuid4
 
-from market_sync import ASSET_DIR, ASSET_SOURCES, BOARD_DIR, BOARD_MAINFLOW_INTRADAY_DIR, BOARD_MEMBER_DIR, FLOW_DIR, FUTURES_DAILY_DIR, FUTURES_MEMBER_TOTAL_FILE, FUTURES_SUMMARY_FILE, FX_FILE, INDEX_CONFIG, INDEX_DIR, INDEX_MEMBER_DIR, LHB_DAILY_DIR, LHB_EVENT_INDEX, LHB_INSTITUTION_DIR, LHB_SPECIAL_DIR, SNAPSHOT_DIR, YIELD_DIR, YIELD_SOURCES, get_cached_board_members, get_daily_schedule_status, get_lhb_seat_details, get_sync_status, maybe_start_background_sync, maybe_start_daily_scheduler
+from market_sync import ASSET_DIR, ASSET_SOURCES, BOARD_DIR, BOARD_MAINFLOW_INTRADAY_DIR, BOARD_MEMBER_DIR, FLOW_DIR, FUTURES_DAILY_DIR, FUTURES_MEMBER_TOTAL_FILE, FUTURES_SUMMARY_FILE, FX_FILE, INDEX_CONFIG, INDEX_DIR, INDEX_MEMBER_DIR, LHB_DAILY_DIR, LHB_EVENT_INDEX, LHB_INSTITUTION_DIR, LHB_SPECIAL_DIR, SNAPSHOT_DIR, VIX_FILE, YIELD_DIR, YIELD_SOURCES, get_cached_board_members, get_daily_schedule_status, get_lhb_seat_details, get_sync_status, maybe_start_background_sync, maybe_start_daily_scheduler
 from market_database import list_stock_catalog, migration_status, read_dataframe as db_read_csv, start_background_migration
 from financial_reports import fetch_company_financials
+import watchlist_service
+import stock_industry_service
+import industry_board_summary_service
+import industry_strength_service
+import board_minute_service
+import sector_rotation_service
+import concept_rotation_service
+import stock_concept_service
+import rising_structure_service
+import five_minute_selection_service
+import period_return_statistics_service
+import inverted_hammer_service
+import hammer_combination_report
+import scan_chan_fractals
+import scan_chan_minutes
+import minute_kline_service
+import stock_quote_service
+import market_position_service
 
 
 def _clean_nan(obj):
@@ -41,6 +64,8 @@ RAW_DIR = os.path.join(STOCK_DIR, "原始数据")
 FRONTEND_DIR = os.path.join(BASE_DIR, "frontend")
 VIDEO_BOARD_EXCLUSIONS_FILE = Path(BASE_DIR) / "data" / "video_board_exclusions.json"
 QUANT_BACKTEST_REPORTS_FILE = Path(BASE_DIR) / "data" / "quant_backtest_reports.json"
+WATCHLISTS_FILE = Path(BASE_DIR) / "data" / "watchlists.json"
+_watchlists_lock = threading.Lock()
 
 os.makedirs(FRONTEND_DIR, exist_ok=True)
 
@@ -66,11 +91,54 @@ def quant_backtest_report_list():
         {key: report.get(key) for key in fields if report.get(key) is not None}
         for report in load_quant_backtest_reports()
     ]
+    if hammer_combination_report.SCREEN_FILE.exists():
+        current = hammer_combination_report.get_report()
+        reports.insert(0, {key: current.get(key) for key in fields if current.get(key) is not None})
     return {
         "total": len(reports),
         "data": reports,
         "write_policy": "仅在用户明确要求把该组对话加入量化回测模块时新增报告",
     }
+
+
+def _default_watchlists():
+    return {"version": 1, "groups": [{"id": "default", "name": "默认分组", "stocks": []}]}
+
+
+def load_watchlists():
+    # The note group is derived data, so refresh it whenever the workbench is read.
+    dates = watchlist_service.recent_market_dates(1)
+    payload = watchlist_service.load_watchlists()
+    screen = payload.get("main_board_30d_screen", {})
+    if dates and (screen.get("trade_date") != dates[-1] or screen.get("method") != "top150_seed_industries_top50_positive"):
+        try:
+            watchlist_service.screen_main_board_30d_top150()
+        except ValueError:
+            pass  # Keep existing lists available before enough daily data is synced.
+    five = next((group for group in payload["groups"] if group["id"] == watchlist_service.FIVE_MINUTE_SELECTION_GROUP_ID), None)
+    if five and five["stocks"] and any(stock.get("return_30d_pct") is None for stock in five["stocks"]):
+        try:
+            five_minute_selection_service.scan_all()
+            payload = watchlist_service.load_watchlists()
+        except Exception:
+            pass
+    try:
+        sector_rotation_service.refresh()
+    except ValueError:
+        pass  # Retain the last successful rotation list while data is incomplete.
+    try:
+        concept_rotation_service.refresh()
+    except (ValueError, OSError):
+        pass  # Keep the last saved concept ranking when a source is temporarily unavailable.
+    return watchlist_service.refresh_noted_stocks(list_stocks)
+
+
+def save_watchlists(payload):
+    watchlist_service.save_watchlists(payload)
+
+
+def mutate_watchlists(action, body):
+    return watchlist_service.mutate_watchlists(action, body, list_stocks)
 
 
 def _parse_filename(fname):
@@ -101,7 +169,7 @@ def list_stocks():
                 else:
                     stocks[code]["has_raw"] = True
     result = sorted(stocks.values(), key=lambda x: x["code"])
-    return result
+    return stock_industry_service.enrich_stocks(result)
 
 
 def _find_csv_path(code):
@@ -185,6 +253,34 @@ def _resample_kline(df, period):
     return resampled
 
 
+def _add_vortex_indicator(df: pd.DataFrame, window: int = 14) -> pd.DataFrame:
+    """按当前K线周期计算 Vortex Indicator，避免跨周期沿用日线指标。"""
+    if df is None or df.empty:
+        return df
+    result = df.copy()
+    high = pd.to_numeric(result.get("high"), errors="coerce")
+    low = pd.to_numeric(result.get("low"), errors="coerce")
+    close = pd.to_numeric(result.get("close"), errors="coerce")
+    previous_close = close.shift(1)
+    true_range = pd.concat(
+        [(high - low).abs(), (high - previous_close).abs(), (low - previous_close).abs()],
+        axis=1,
+    ).max(axis=1)
+    positive_movement = (high - low.shift(1)).abs()
+    negative_movement = (low - high.shift(1)).abs()
+    range_sum = true_range.rolling(window=window, min_periods=window).sum()
+    vi_plus = positive_movement.rolling(window=window, min_periods=window).sum() / range_sum
+    vi_minus = negative_movement.rolling(window=window, min_periods=window).sum() / range_sum
+    result["VI_Plus"] = vi_plus.replace([float("inf"), float("-inf")], pd.NA).round(4)
+    result["VI_Minus"] = vi_minus.replace([float("inf"), float("-inf")], pd.NA).round(4)
+    result["VI_Spread"] = (vi_plus - vi_minus).replace([float("inf"), float("-inf")], pd.NA).round(4)
+    previous_spread = result["VI_Spread"].shift(1)
+    result["VI_Signal"] = 0
+    result.loc[(result["VI_Spread"] > 0) & (previous_spread <= 0), "VI_Signal"] = 1
+    result.loc[(result["VI_Spread"] < 0) & (previous_spread >= 0), "VI_Signal"] = -1
+    return result
+
+
 def get_stock_kline(code, period="day"):
     path, dtype = _find_csv_path(code)
     if not path:
@@ -212,12 +308,13 @@ def get_stock_kline(code, period="day"):
 
     df = df.dropna(subset=["date", "close"])
     if period != "day":
-        return _resample_kline(df, period)
+        result = _resample_kline(df, period)
     else:
         df["date"] = pd.to_datetime(df["date"]).dt.strftime("%Y-%m-%d")
         for c in df.select_dtypes(include="number").columns:
             df[c] = df[c].round(4)
-        return df
+        result = df
+    return _add_vortex_indicator(result)
 
 
 def _normalize_stock_name(value):
@@ -338,6 +435,20 @@ def market_overview():
             return frame.head(count).to_dict(orient="records")
         return frame.sort_values(numeric, ascending=False).head(count).to_dict(orient="records")
 
+    vix = None
+    if VIX_FILE.exists():
+        try:
+            vix_frame = db_read_csv(VIX_FILE).dropna(subset=["date", "close"]).sort_values("date")
+            if not vix_frame.empty:
+                latest_vix = vix_frame.iloc[-1]
+                risk_level = latest_vix.get("risk_level")
+                vix = {
+                    "date": str(latest_vix["date"]), "close": float(latest_vix["close"]),
+                    "change_pct": None if pd.isna(latest_vix.get("change_pct")) else float(latest_vix["change_pct"]),
+                    "risk_level": "--" if pd.isna(risk_level) else str(risk_level),
+                }
+        except Exception:
+            vix = None
     return {
         "dates": {"stock_moneyflow": stock_date, "industry_moneyflow": industry_date, "concept_moneyflow": concept_date},
         "stock_moneyflow": summary(stock),
@@ -346,8 +457,21 @@ def market_overview():
         "top_stock_inflow": top(stock),
         "top_industry": top(industry),
         "top_concept": top(concept),
+        "vix": vix,
+        "market_position": get_market_position(),
         "sync": get_sync_status(),
     }
+
+
+def get_market_position():
+    try:
+        frame = get_index_kline("000001", "day")
+        result = market_position_service.assess_market_position(frame)
+        result["flight_height"] = market_position_service.assess_flight_height(frame)
+        return result
+    except Exception:
+        return {"available": False, "name": "上证指数", "lookback": 30,
+                "reason": "上证指数日线读取失败，暂不判断仓位"}
 
 
 def data_coverage():
@@ -373,6 +497,7 @@ def data_coverage():
         "macro": {
             "yield_curves": sum(1 for config in YIELD_SOURCES.values() if (YIELD_DIR / config["file"]).exists()),
             "global_asset_files": sum(1 for config in ASSET_SOURCES.values() if (ASSET_DIR / config["file"]).exists()),
+            "vix_available": VIX_FILE.exists(),
             "fx_available": FX_FILE.exists(),
             "cffex_daily_files": len(list(FUTURES_DAILY_DIR.glob("cffex_rank_*.csv"))),
             "cffex_summary_rows": len(db_read_csv(FUTURES_SUMMARY_FILE)) if FUTURES_SUMMARY_FILE.exists() else 0,
@@ -401,6 +526,12 @@ def get_global_asset(symbol: str):
     if not path.exists():
         return None
     return db_read_csv(path).dropna(subset=["date", "close"]).sort_values("date")
+
+
+def get_vix_history():
+    if not VIX_FILE.exists():
+        return None
+    return db_read_csv(VIX_FILE).dropna(subset=["date", "close"]).sort_values("date")
 
 
 def get_fx_history():
@@ -685,7 +816,7 @@ def get_board_kline(board_type, name, period="day"):
     folder = folder_map.get(board_type)
     if not folder:
         return None
-    path = Path(BOARD_DIR) / folder / f"{name}.csv"
+    path = Path(BOARD_DIR) / folder / f"{stock_concept_service.safe_name(name)}.csv"
     if not path.exists():
         return None
     df = db_read_csv(path)
@@ -1251,10 +1382,77 @@ class KlineHandler(SimpleHTTPRequestHandler):
             # 浏览器刷新或切换页面时可能主动取消长 JSON 请求，不影响服务或同步任务。
             pass
 
+    def _read_json_body(self):
+        try:
+            length = int(self.headers.get("Content-Length", "0"))
+        except ValueError:
+            raise ValueError("无效的请求长度")
+        if length <= 0 or length > 65536:
+            raise ValueError("请求内容为空或过大")
+        try:
+            return json.loads(self.rfile.read(length).decode("utf-8"))
+        except (UnicodeDecodeError, json.JSONDecodeError):
+            raise ValueError("请求内容必须为JSON")
+
+    def do_POST(self):
+        path = urlparse(self.path).path
+        if path not in {"/api/watchlists", "/api/inverted-hammer/review", "/api/inverted-hammer/note", "/api/inverted-hammer/scan", "/api/rising-structure/scan", "/api/five-minute-selection/scan", "/api/period-return-statistics/scan", "/api/main-board-30d/scan", "/api/sector-rotation/refresh", "/api/concept-rotation/refresh"}:
+            self._send_json({"error": "接口不存在"}, 404)
+            return
+        try:
+            body = self._read_json_body()
+            if path == "/api/inverted-hammer/review":
+                self._send_json(inverted_hammer_service.save_review(
+                    str(body.get("code", "")), str(body.get("date", "")), body.get("review", "")
+                ))
+                return
+            if path == "/api/inverted-hammer/note":
+                self._send_json(inverted_hammer_service.save_note(
+                    str(body.get("code", "")), str(body.get("date", "")), str(body.get("note", ""))
+                ))
+                return
+            if path == "/api/inverted-hammer/scan":
+                self._send_json(inverted_hammer_service.scan_all())
+                return
+            if path == "/api/rising-structure/scan":
+                self._send_json(rising_structure_service.scan_all())
+                return
+            if path == "/api/five-minute-selection/scan":
+                self._send_json(five_minute_selection_service.scan_all())
+                return
+            if path == "/api/period-return-statistics/scan":
+                self._send_json(period_return_statistics_service.scan_all())
+                return
+            if path == "/api/main-board-30d/scan":
+                self._send_json(watchlist_service.screen_main_board_30d_top150())
+                return
+            if path == "/api/sector-rotation/refresh":
+                self._send_json(sector_rotation_service.refresh(force=True))
+                return
+            if path == "/api/concept-rotation/refresh":
+                dates=watchlist_service.recent_market_dates(1)
+                synced=stock_concept_service.sync_members(dates[-1]) if dates else {"errors":[]}
+                screen=concept_rotation_service.refresh(force=True)
+                self._send_json({**screen,"member_sync":synced})
+                return
+            action = str(body.get("action", "")) if isinstance(body, dict) else ""
+            self._send_json(mutate_watchlists(action, body))
+        except ValueError as exc:
+            self._send_json({"error": str(exc)}, 400)
+        except Exception as exc:
+            self._send_json({"error": f"自选股保存失败：{str(exc)[:160]}"}, 500)
+
     def do_GET(self):
         parsed = urlparse(self.path)
         path = parsed.path
         query = parse_qs(parsed.query)
+
+        if path == "/api/rising-structure/daily":
+            try:
+                self._send_json(rising_structure_service.get_daily_structures(str(query.get("code", [""])[0])))
+            except ValueError as exc:
+                self._send_json({"error": str(exc)}, 400)
+            return
 
         if path == "/api/stocks":
             try:
@@ -1262,6 +1460,61 @@ class KlineHandler(SimpleHTTPRequestHandler):
                 self._send_json({"total": len(stocks), "data": stocks})
             except Exception as e:
                 self._send_json({"error": str(e)}, 500)
+            return
+
+        if path == "/api/watchlists":
+            self._send_json(load_watchlists())
+            return
+
+        if path == "/api/kline-notes":
+            code = str(query.get("code", [""])[0]).zfill(6)
+            if not re.fullmatch(r"\d{6}", code):
+                self._send_json({"error": "股票代码必须为6位数字"}, 400)
+            else:
+                self._send_json({"code": code, "notes": watchlist_service.get_kline_notes(load_watchlists(), code)})
+            return
+
+        if path == "/api/inverted-hammer/events":
+            code = str(query.get("code", [""])[0]).zfill(6)
+            self._send_json(inverted_hammer_service.get_events(code))
+            return
+
+        if path == "/api/chan-fractals/events":
+            code = str(query.get("code", [""])[0]).zfill(6)
+            try:
+                self._send_json(scan_chan_fractals.stock_events(code))
+            except ValueError as exc:
+                self._send_json({"error": str(exc)}, 400)
+            return
+
+        if path == "/api/minute-kline/status":
+            self._send_json(minute_kline_service.load_status())
+            return
+
+        if path == "/api/minute-chan/events":
+            code = str(query.get("code", [""])[0]).zfill(6)
+            try:
+                interval = int(query.get("interval", ["5"])[0])
+                self._send_json(scan_chan_minutes.read_structure(code, interval))
+            except ValueError as exc:
+                self._send_json({"error": str(exc)}, 400)
+            return
+
+        if path == "/api/minute-kline":
+            code = str(query.get("code", [""])[0]).zfill(6)
+            try:
+                limit = int(query.get("limit", ["2400"])[0])
+                trade_date = query.get("date", [None])[0]
+                interval = int(query.get("interval", ["1"])[0])
+                focus_date = query.get("focus_date", [None])[0]
+                context_days = int(query.get("context_days", ["10"])[0])
+                data = minute_kline_service.read_minute_kline(code, limit, trade_date, interval, focus_date, context_days)
+                if data is None:
+                    self._send_json({"error": f"股票 {code} 的一分钟K线尚未下载"}, 404)
+                else:
+                    self._send_json(data)
+            except ValueError as exc:
+                self._send_json({"error": str(exc)}, 400)
             return
 
         if path == "/api/sync/status":
@@ -1295,7 +1548,9 @@ class KlineHandler(SimpleHTTPRequestHandler):
             if not report_id:
                 self._send_json({"error": "缺少 id 参数"}, 400)
                 return
-            report = next((item for item in load_quant_backtest_reports() if str(item.get("id")) == str(report_id)), None)
+            report = (hammer_combination_report.get_report()
+                      if report_id == hammer_combination_report.REPORT_ID and hammer_combination_report.SCREEN_FILE.exists()
+                      else next((item for item in load_quant_backtest_reports() if str(item.get("id")) == str(report_id)), None))
             if report is None:
                 self._send_json({"error": "未找到该回测报告"}, 404)
             else:
@@ -1376,6 +1631,16 @@ class KlineHandler(SimpleHTTPRequestHandler):
                 self._send_json({"symbol": symbol, "name": config["name"], "source": "新浪外盘期货", "total": len(data), "data": data.to_dict(orient="records")})
             return
 
+
+        if path == "/api/macro/vix":
+            data = get_vix_history()
+            if data is None:
+                self._send_json({"error": "VIX历史尚未同步完成"}, 404)
+            else:
+                records = data.where(pd.notnull(data), None).to_dict(orient="records")
+                self._send_json({"name": "Cboe VIX", "source": "FRED（Cboe VIXCLS）", "total": len(data), "data": records})
+            return
+
         if path == "/api/macro/fx":
             data = get_fx_history()
             if data is None:
@@ -1428,6 +1693,15 @@ class KlineHandler(SimpleHTTPRequestHandler):
                 self._send_json({"error": "该日期的交易所会员排名尚未归档"}, 404)
             else:
                 self._send_json({"date": trade_date, "variety": variety or "all", "total": len(data), "data": data.to_dict(orient="records"), "note": "交易所公布的是期货公司会员排名，不等同于最终投资者机构持仓。"})
+            return
+
+        if path == "/api/stock/quote":
+            try:
+                self._send_json(stock_quote_service.get_stock_quote(str(query.get("code", [""])[0])))
+            except ValueError as exc:
+                self._send_json({"error": str(exc)}, 400)
+            except stock_quote_service.QuoteUnavailable as exc:
+                self._send_json({"error": str(exc)}, 503)
             return
 
         if path == "/api/stock/snapshot":
@@ -1503,6 +1777,21 @@ class KlineHandler(SimpleHTTPRequestHandler):
                 self._send_json({"total": len(boards), "data": boards})
             return
 
+        if path == "/api/board/minute-kline":
+            try:
+                payload = board_minute_service.get_board_minute_kline(
+                    query.get("type", ["industry"])[0], query.get("name", [""])[0],
+                    int(query.get("interval", ["1"])[0]), query.get("trade_date", [None])[0],
+                    query.get("benchmark", ["000001"])[0], query.get("refresh", ["0"])[0] == "1")
+                self._send_json(payload)
+            except (ValueError, FileNotFoundError) as error:
+                self._send_json({"error": str(error)}, 400)
+            except board_minute_service.MinuteUnavailable as error:
+                self._send_json({"error": str(error)}, 503)
+            except (OSError, KeyError) as error:
+                self._send_json({"error": f"板块分钟缓存读取失败：{error}"}, 503)
+            return
+
         if path == "/api/board/kline":
             board_type = query.get("type", [None])[0]
             name = query.get("name", [None])[0]
@@ -1520,6 +1809,34 @@ class KlineHandler(SimpleHTTPRequestHandler):
                 source = data.attrs.get("source", "本地兼容数据")
                 latest_date = str(data.iloc[-1]["date"]) if not data.empty and "date" in data.columns else None
                 self._send_json({"type": board_type, "name": name, "period": period, "total": len(data), "latest_date": latest_date, "data": data.to_dict(orient="records"), "source": source})
+            return
+
+        if path in {"/api/board/industry-flow-history", "/api/board/concept-flow-history"}:
+            name = query.get("name", [""])[0].strip()
+            if not name:
+                self._send_json({"error": "name 不能为空"}, 400)
+                return
+            self._send_json(industry_board_summary_service.get_industry_flow_history(name,"concept" if "concept-flow" in path else "industry"))
+            return
+
+        if path == "/api/board/industry-summary":
+            self._send_json(industry_board_summary_service.get_industry_summaries())
+            return
+
+        if path == "/api/board/industry-strength-history":
+            name = query.get("name", [""])[0].strip()
+            if not name:
+                self._send_json({"error": "name 不能为空"}, 400)
+                return
+            self._send_json(industry_strength_service.get_industry_strength_history(name))
+            return
+        if path == "/api/board/concept-strength-history":
+            name=query.get("name",[""])[0].strip()
+            if not name:
+                self._send_json({"error":"name 不能为空"},400)
+                return
+            try:self._send_json(concept_rotation_service.history(name))
+            except ValueError as error:self._send_json({"error":str(error)},400)
             return
 
         if path == "/api/board/moneyflow":
@@ -1704,6 +2021,123 @@ class ExclusiveHTTPServer(ThreadingHTTPServer):
         super().server_bind()
 
 
+def _port_listeners(port):
+    """Read Windows listener owners without adding a runtime dependency."""
+    script = (
+        f"$items = @(Get-NetTCPConnection -LocalPort {port} -State Listen "
+        "-ErrorAction SilentlyContinue | Select-Object -ExpandProperty OwningProcess -Unique | "
+        "ForEach-Object { Get-CimInstance Win32_Process -Filter \"ProcessId = $_\" | "
+        "Select-Object ProcessId,Name,CommandLine }); "
+        "ConvertTo-Json -InputObject $items -Compress"
+    )
+    result = subprocess.run(
+        ["powershell.exe", "-NoProfile", "-NonInteractive", "-Command", script],
+        capture_output=True, text=True, timeout=10, check=True,
+    )
+    return json.loads(result.stdout or "[]")
+
+
+def _is_own_server_process(process):
+    if (process.get("Name") or "").lower() not in {"python.exe", "pythonw.exe"}:
+        return False
+    command = (process.get("CommandLine") or "").replace("/", "\\").casefold()
+    target = str(Path(__file__).resolve()).replace("/", "\\").casefold()
+    start = command.find(target)
+    if start < 0:
+        return False
+    before = command[start - 1] if start else ""
+    after = command[start + len(target):start + len(target) + 1]
+    return (not before or before.isspace() or before == '"') and (not after or after.isspace() or after == '"')
+
+
+def _replace_old_server(port):
+    if os.name != "nt":
+        return False
+    try:
+        listeners = _port_listeners(port)
+    except (OSError, subprocess.SubprocessError, ValueError) as exc:
+        print(f"[启动] 无法确认端口占用进程：{exc}", flush=True)
+        return False
+    if not listeners or not all(_is_own_server_process(item) for item in listeners):
+        return False
+    pids = {int(item["ProcessId"]) for item in listeners}
+    if os.getpid() in pids:
+        return False
+    for pid in pids:
+        print(f"[启动] 正在关闭旧的 kline_server.py（PID {pid}）", flush=True)
+        try:
+            os.kill(pid, signal.SIGTERM)
+        except OSError as exc:
+            print(f"[启动] 无法关闭旧服务：{exc}", flush=True)
+            return False
+    for _ in range(30):
+        time.sleep(0.2)
+        try:
+            if not _port_listeners(port):
+                return True
+        except (OSError, subprocess.SubprocessError, ValueError):
+            return False
+    return False
+
+
+def _minute_downloader_alive(status):
+    pid = int(status.get("pid") or 0)
+    if pid > 0 and os.name == "nt":
+        import ctypes
+        handle = ctypes.windll.kernel32.OpenProcess(0x1000, False, pid)
+        if handle:
+            exit_code = ctypes.c_ulong()
+            try:
+                if ctypes.windll.kernel32.GetExitCodeProcess(handle, ctypes.byref(exit_code)) and exit_code.value == 259:
+                    return True
+            finally:
+                ctypes.windll.kernel32.CloseHandle(handle)
+    # Older manual downloaders did not record their PID. Fresh progress means
+    # another downloader is likely active; do not launch a duplicate.
+    if status.get("state") == "running" and not pid:
+        try:
+            return time.time() - datetime.fromisoformat(status["updated_at"]).timestamp() < 600
+        except (KeyError, TypeError, ValueError):
+            pass
+    return False
+
+
+def maybe_start_minute_kline_update():
+    """Start a detached, resumable one-minute update after the HTTP port is bound."""
+    status = minute_kline_service.load_status()
+    if _minute_downloader_alive(status):
+        return False
+    log_dir = Path(BASE_DIR) / "data"
+    log_dir.mkdir(parents=True, exist_ok=True)
+    flags = subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0
+    with (log_dir / "minute_auto.stdout.log").open("ab") as stdout, (log_dir / "minute_auto.stderr.log").open("ab") as stderr:
+        subprocess.Popen(
+            [sys.executable, str(Path(BASE_DIR) / "minute_kline_service.py"), "--then-all",
+             "--count", "60000", "--resume", "--update"],
+            cwd=BASE_DIR, stdout=stdout, stderr=stderr, creationflags=flags,
+        )
+    return True
+
+
+def _scan_startup_markers():
+    """Precalculate all workbench markers once when the program starts."""
+    try:
+        scan_chan_fractals.scan(scan_chan_fractals.DEFAULT_OUTPUT)
+        print("[启动] 全部个股顶底分型已计算", flush=True)
+    except Exception as exc:
+        print(f"[启动] 顶底分型计算失败：{exc}", flush=True)
+    try:
+        result = inverted_hammer_service.scan_all()
+        print(f"[启动] 倒垂线已计算：{result.get('event_count', 0)} 个", flush=True)
+    except Exception as exc:
+        print(f"[启动] 倒垂线计算失败：{exc}", flush=True)
+    try:
+        result = scan_chan_minutes.scan_all()
+        print(f"[启动] 分钟缠论已计算：{result}", flush=True)
+    except Exception as exc:
+        print(f"[启动] 分钟缠论计算失败：{exc}", flush=True)
+
+
 def main():
     host = "0.0.0.0"
     port = 8000
@@ -1711,21 +2145,26 @@ def main():
         server = ExclusiveHTTPServer((host, port), KlineHandler)
     except OSError as exc:
         if getattr(exc, "winerror", None) == 10048:
-            print(f"[启动失败] 端口 {port} 已被占用。请关闭已运行的 kline_server.py 窗口，或在 PowerShell 执行：")
-            print(f"  Get-NetTCPConnection -LocalPort {port} -State Listen | Select-Object -Expand OwningProcess")
-            print("  Stop-Process -Id <上一步显示的进程号>")
-            return
-        raise
+            if _replace_old_server(port):
+                server = ExclusiveHTTPServer((host, port), KlineHandler)
+            else:
+                print(f"[启动失败] 端口 {port} 被其他程序占用，或旧服务未能退出；请检查占用进程。")
+                return
+        else:
+            raise
     started = maybe_start_background_sync()
     schedule_started = maybe_start_daily_scheduler()
     database_started = start_background_migration()
+    minute_started = maybe_start_minute_kline_update()
+    threading.Thread(target=_scan_startup_markers, name="aitrader-startup-markers", daemon=True).start()
     print(f"K线图服务启动: http://localhost:{port}")
     print(f"  股票列表API: http://localhost:{port}/api/stocks")
     print(f"  K线数据API:  http://localhost:{port}/api/kline?code=000001&period=day")
     print(f"  自动免费同步: {'已启动' if started else '未启动/已有任务'}")
     print("  板块分时资金: 东方财富午盘/收盘后回补")
-    print(f"  每日定时更新: {'已启动（11:35 午盘资金，18:00 全部数据）' if schedule_started else '未启动/已禁用'}")
+    print(f"  每日定时更新: {'已启动（11:35 午盘资金，16:30 全部数据）' if schedule_started else '未启动/已禁用'}")
     print(f"  SQLite 数据库: {'后台迁移已启动' if database_started else '迁移任务已运行'}")
+    print(f"  一分钟K线更新: {'已自动启动' if minute_started else '已有下载任务，未重复启动'}")
     try:
         server.serve_forever()
     except KeyboardInterrupt:

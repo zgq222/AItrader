@@ -98,7 +98,9 @@ Thumbs.db
 /data/sync_status.json
 /data/daily_schedule_status.json
 /data/intraday_flow_status.json
+/data/watchlists.json
 /data/sync.lock
+/data/stock_quotes/
 
 # Keep user-edited application configuration/report registry publishable
 !/data/video_board_exclusions.json
@@ -127,10 +129,13 @@ Thumbs.db
 /板块/成分股/
 /板块/分时主力资金/
 /板块/分时资金流/
+/板块/分钟K线/
+/指数/分钟K线/
 /板块/概念板块/
 /板块/行业板块/
 /板块/资金流/
 /tests/data/
+/data/inverted_hammer_notes.json
 
 # Secrets at any nesting depth
 **/.env
@@ -140,3 +145,25 @@ Thumbs.db
 # Documentation
 docs/build/
 docs/_build/
+
+# Android source is publishable; build products and local signing material are not.
+!/mobile-hammer/app/src/**/*.xml
+/mobile-hammer/*.apk
+**/*.jks
+**/*.keystore
+
+# Generated market research, exports, and minute-price caches.
+*.tmp
+**/node_modules/
+/data/research/
+/data/hammer_export_work/
+/data/hammer_sample_export_input.json
+/data/inverted_hammer_screen.json
+/data/inverted_hammer_combination_report.json
+/data/inverted_hammer_64_report.*
+/data/minute_file_coverage.json
+/data/minute_kline_status.json
+/data/industry-board-summary.jpg
+/data/industry-flow-history.jpg
+/data/stock-minute-history.jpg
+/个股/一分钟/
