@@ -16,7 +16,7 @@ import java.io.*;
 import static org.junit.Assert.*;
 
 @RunWith(RobolectricTestRunner.class)
-@Config(sdk=35,application=Application.class,qualifiers="w390dp-h844dp-xxhdpi",shadows=TradingFeaturesTest.FakeTencent.class)
+@Config(sdk=35,application=Application.class,qualifiers="w390dp-h844dp-xxhdpi",shadows={TradingFeaturesTest.FakeTencent.class,TradingFeaturesTest.FakeBoard.class})
 @GraphicsMode(GraphicsMode.Mode.NATIVE)
 public class LandscapeTest {
     private View root(Activity a){return ((ViewGroup)a.findViewById(android.R.id.content)).getChildAt(0);}

@@ -39,6 +39,8 @@ final class StockChartView extends View {
     private int initialEnd;
     private boolean dragged;
     private boolean minute;
+    private int period=ChartPeriod.DAY;
+    private java.util.Map<String,String> periodSpans=new java.util.HashMap<>();
     private double stopPrice=Double.NaN;
     private List<MinuteBehavior.Zone> zones=new ArrayList<>();
     private java.util.Map<String,Double> volumeBaselines=new java.util.HashMap<>();
@@ -58,13 +60,14 @@ final class StockChartView extends View {
     void setBars(List<DailyBar> data){
         boolean first=bars.isEmpty(),atLatest=end>=bars.size();
         String selectedDate=selected>=0&&selected<bars.size()?bars.get(selected).date:null;
+        String endDate=end>0&&end<=bars.size()?bars.get(end-1).date:null;
         boolean selectedLatest=selected==bars.size()-1;
         bars=new ArrayList<>(data);values=new StockIndicators(bars);
-        long now=System.currentTimeMillis();volumeBaselines=minute?MinuteBehavior.baselines(bars,now):new java.util.HashMap<>();
-        zones=minute?MinuteBehavior.find(bars,now,volumeBaselines):new ArrayList<>();
+        long now=System.currentTimeMillis();volumeBaselines=minute?MinuteBehavior.baselines(bars,now,period):new java.util.HashMap<>();
+        zones=minute?MinuteBehavior.find(bars,now,volumeBaselines,period):new ArrayList<>();
         behaviorLabels.clear();
         if(first){visible=Math.min(50,bars.size());end=bars.size();}
-        else {visible=Math.min(visible,bars.size());end=atLatest?bars.size():Math.min(end,bars.size());}
+        else {visible=Math.min(visible,bars.size());end=atLatest?bars.size():Math.min(end,bars.size());if(!atLatest&&endDate!=null)for(int i=0;i<bars.size();i++)if(endDate.equals(bars.get(i).date)){end=Math.max(visible,i+1);break;}}
         selected=bars.isEmpty()?-1:Math.min(selected,bars.size()-1);
         if(first||selectedLatest)selected=bars.size()-1;
         else if(selectedDate!=null)for(int i=0;i<bars.size();i++)if(selectedDate.equals(bars.get(i).date)){selected=i;break;}
@@ -73,7 +76,9 @@ final class StockChartView extends View {
     int[] viewport(){return new int[]{end,visible,selected,indicator};}
     void setVisibleCount(int count){if(bars.isEmpty())return;visible=Math.max(1,Math.min(count,bars.size()));end=bars.size();selected=end-1;invalidate();if(listener!=null)listener.onSelected(selected);}
     void restoreViewport(int[] values){if(values==null||values.length!=4||bars.isEmpty())return;visible=Math.max(1,Math.min(values[1],bars.size()));end=Math.max(visible,Math.min(values[0],bars.size()));selected=Math.max(-1,Math.min(values[2],bars.size()-1));indicator=Math.max(0,Math.min(values[3],INDICATORS.length-1));invalidate();if(listener!=null&&selected>=0)listener.onSelected(selected);}
-    void setMinuteMode(boolean value){minute=value;bars=new ArrayList<>();end=0;selected=-1;zones.clear();volumeBaselines.clear();behaviorLabels.clear();invalidate();}
+    void setMinuteMode(boolean value){setPeriod(value?ChartPeriod.FIFTEEN:ChartPeriod.DAY);}
+    void setPeriod(int value){period=value;minute=ChartPeriod.minute(value);bars=new ArrayList<>();end=0;selected=-1;zones.clear();volumeBaselines.clear();behaviorLabels.clear();periodSpans.clear();invalidate();}
+    void setPeriodSpans(java.util.Map<String,String> values){periodSpans=new java.util.HashMap<>(values);}
     void setStopPrice(double value){stopPrice=value>0&&Double.isFinite(value)?value:Double.NaN;invalidate();}
     void focus(int index){if(bars.isEmpty())return;selected=Math.max(0,Math.min(index,bars.size()-1));end=Math.min(bars.size(),Math.max(visible,selected+Math.max(1,visible/3)));invalidate();if(listener!=null)listener.onSelected(selected);}
     List<MinuteBehavior.Zone> behaviorZones(){return new ArrayList<>(zones);}
@@ -99,7 +104,7 @@ final class StockChartView extends View {
         super.onDraw(canvas);
         canvas.drawColor(Color.WHITE);
         behaviorLabels.clear();
-        if(bars.isEmpty()){label(canvas,minute?"暂无15分钟K线数据":"暂无日K数据",dp(24),dp(48),LABEL,15);return;}
+        if(bars.isEmpty()){label(canvas,"暂无"+ChartPeriod.label(period)+"数据",dp(24),dp(48),LABEL,15);return;}
         int start=Math.max(0,end-visible),count=end-start;
         float left=dp(13),right=getWidth()-dp(47);
         float priceTop=minute?layoutBehaviorLabels(start,end,left):dp(36),priceBottom=getHeight()*.53f;
@@ -153,7 +158,7 @@ final class StockChartView extends View {
             line(canvas,values.bollLower,start,end,left,slot,min,max,priceTop,priceBottom,DOWN);
         }
         canvas.restore();
-        label(canvas,minute?"15分钟 MA5":"日K  MA5",left,dp(18),GOLD,11);
+        label(canvas,ChartPeriod.label(period)+"  MA5",left,dp(18),GOLD,11);
         label(canvas,"MA10",left+dp(83),dp(18),BLUE,11);
         label(canvas,"MA20",left+dp(143),dp(18),PURPLE,11);
         label(canvas,"成交量",left,volumeTop-dp(7),LABEL,11);
@@ -347,8 +352,9 @@ final class StockChartView extends View {
         String summary=String.format(Locale.CHINA,"%s  开 %.2f  高 %.2f  低 %.2f  收 %.2f  涨跌 %s%%\n成交量 %s  MA5 %s  MA10 %s  MA20 %s",
                 bar.date,bar.open,bar.high,bar.low,bar.close,number(change,2),compact(bar.volume),
                 number(values.ma5[index],2),number(values.ma10[index],2),number(values.ma20[index],2));
+        if(period==ChartPeriod.WEEK||period==ChartPeriod.MONTH)summary=ChartPeriod.label(period)+" · "+periodSpans.getOrDefault(bar.date,bar.date)+"\n"+summary;
         if(minute){
-            summary+="\n"+(MinuteBehavior.epoch(bar.date)>System.currentTimeMillis()?"本根尚未结束，不确认行为":"已结束的15分钟K线");
+            summary+="\n"+(MinuteBehavior.epoch(bar.date)>System.currentTimeMillis()?"本根尚未结束，不确认行为":"已结束的"+ChartPeriod.label(period));
             double baseline=volumeBaselines.getOrDefault(bar.date.substring(0,10),0.0);
             summary+=baseline>0?String.format(Locale.CHINA," · 20交易日中位量 %s · 本根量比 %.2f",compact(baseline),bar.volume/baseline):" · 当前日前不足20个完整交易日，暂无放量基准";
             for(int i=0;i<zones.size();i++){MinuteBehavior.Zone z=zones.get(i);if(index>=z.start&&index<=z.end)summary+=" · "+(i+1)+" "+z.label();}

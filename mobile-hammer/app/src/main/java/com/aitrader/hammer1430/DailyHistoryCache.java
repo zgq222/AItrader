@@ -9,6 +9,8 @@ import org.json.*;
 /** One raw daily-history download per code/session, shared by all three screens. */
 final class DailyHistoryCache {
     private final File directory;
+    private static final java.util.concurrent.ConcurrentHashMap<String,Object> LOCKS=new java.util.concurrent.ConcurrentHashMap<>();
+    private static Object lock(String code){return LOCKS.computeIfAbsent(code,k->new Object());}
     DailyHistoryCache(Context context){directory=new File(context.getFilesDir(),"raw_daily_v1");directory.mkdirs();}
     List<DailyBar> cached(String code)throws Exception{
         if(!code.matches("\\d{6}"))throw new IOException("股票代码无效");
@@ -30,8 +32,10 @@ final class DailyHistoryCache {
     List<DailyBar> load(TencentClient.Quote quote,String latest)throws Exception{
         return load(quote,latest,120);
     }
-    List<DailyBar> load(TencentClient.Quote quote,String latest,int historyCount)throws Exception{
+    List<DailyBar> load(TencentClient.Quote quote,String latest,int historyCount)throws Exception{synchronized(lock(quote.code)){return loadLocked(quote,latest,historyCount);}}
+    private List<DailyBar> loadLocked(TencentClient.Quote quote,String latest,int historyCount)throws Exception{
         File file=new File(directory,quote.code+".json");List<DailyBar> bars=null;int cachedHistoryCount=120;
+        if(file.exists())try{if(new JSONObject(read(file)).optBoolean("full_history"))return loadFull(quote.code,latest,quote,null);}catch(org.json.JSONException ignored){}
         if(file.exists())try{
             JSONObject saved=new JSONObject(read(file));
             cachedHistoryCount=saved.optInt("history_count",120);
@@ -65,6 +69,23 @@ final class DailyHistoryCache {
         for(DailyBar bar:bars)if(bar.date.compareTo(latest)<=0)byDate.put(bar.date,bar);
         if(latest.equals(quote.today.date))byDate.put(latest,quote.today);
         return new ArrayList<>(byDate.values());
+    }
+    boolean complete(String code){try{return new JSONObject(read(new File(directory,code+".json"))).optBoolean("full_history");}catch(Exception e){return false;}}
+    List<DailyBar> loadFull(String code,String latest,TencentClient.Quote quote,TencentClient.Progress progress)throws Exception{synchronized(lock(code)){return fullLocked(code,latest,quote,progress);}}
+    private List<DailyBar> fullLocked(String code,String latest,TencentClient.Quote quote,TencentClient.Progress progress)throws Exception{
+        if(!code.matches("\\d{6}"))throw new IOException("股票代码无效");
+        File file=new File(directory,code+".json");JSONObject saved=null;List<DailyBar> previous=null;
+        if(file.exists())try{saved=new JSONObject(read(file));if(saved.optBoolean("full_history"))previous=cached(code);}catch(Exception ignored){}
+        TreeMap<String,DailyBar> all=new TreeMap<>();boolean write=false;
+        if(previous!=null){for(DailyBar b:previous)all.put(b.date,b);String through=saved.getString("through");if(!latest.equals(through)){
+            long gap=java.time.temporal.ChronoUnit.DAYS.between(java.time.LocalDate.parse(through),java.time.LocalDate.parse(latest));
+            if(gap>90)all.clear();else {List<DailyBar> recent=TencentClient.history(code,latest);if(recent.isEmpty())throw new IOException("日K增量更新为空");for(DailyBar b:recent)if(b.date.compareTo(latest)<=0)all.put(b.date,b);write=true;}
+        }}
+        if(all.isEmpty()){for(DailyBar b:TencentClient.fullHistory(code,latest,progress))all.put(b.date,b);write=true;}
+        if(quote!=null&&latest.equals(quote.today.date))all.put(latest,quote.today);
+        if(write){JSONArray values=new JSONArray();for(DailyBar b:all.values())values.put(new JSONArray().put(b.date).put(b.open).put(b.high).put(b.low).put(b.close).put(Double.isFinite(b.volume)?b.volume:JSONObject.NULL));JSONObject payload=new JSONObject().put("through",latest).put("full_history",true).put("history_count",all.size()).put("bars",values);
+            ChartFiles.write(file,payload.toString().getBytes(StandardCharsets.UTF_8));
+        }return new ArrayList<>(all.values());
     }
     private String read(File file)throws IOException{
         try(FileInputStream input=new FileInputStream(file);ByteArrayOutputStream output=new ByteArrayOutputStream()){

@@ -36,7 +36,14 @@ public final class BoardChartActivity extends Activity implements TraderApplicat
     private static final String SERVER_URL="desktop_api_url";
     private final int red=Ui.RED,green=Ui.GREEN;
     private final List<Button> rangeButtons=new ArrayList<>();
-    private String industry;
+    private String industry,boardCode="";
+    private int period=ChartPeriod.DAY;
+    private TextView selectedHeading,chartTitle,navigationCaption;
+    private final Map<Integer,Button> periodButtons=new HashMap<>();
+    private final Map<Integer,int[]> periodWindows=new HashMap<>();
+    private final Map<String,String> spans=new HashMap<>();
+    private List<Bar> dailyBars=new ArrayList<>();
+    private Thread loader;
     private TextView source,detail,status,metricSource,metricDetail;
     private IndustryMetricChart strengthChart,breadthChart;
     private final Map<String,JSONObject> indicators=new HashMap<>();
@@ -54,23 +61,24 @@ public final class BoardChartActivity extends Activity implements TraderApplicat
     private void add(LinearLayout parent,View child){parent.addView(child,new LinearLayout.LayoutParams(-1,-2));}
 
     @Override public void onCreate(Bundle saved){super.onCreate(saved);
-        orientation=new ChartOrientation(this,saved);
+        orientation=new ChartOrientation(this,saved);if(saved!=null){period=saved.getInt("board_period",0);for(int p:new int[]{0,7,30})periodWindows.put(p,saved.getIntArray("board_window:"+p));}
         industry=getIntent().getStringExtra(EXTRA_INDUSTRY);
         concept="concept".equals(getIntent().getStringExtra(EXTRA_TYPE));
         if(industry==null)industry="";
         LinearLayout root=Ui.column(this);setContentView(root);Ui.install(this,root);ScrollView scroll=new ScrollView(this);scroll.setTag("chart-scroll");root.addView(scroll,new LinearLayout.LayoutParams(-1,0,1));
         LinearLayout page=new LinearLayout(this);page.setOrientation(LinearLayout.VERTICAL);page.setPadding(dp(16),dp(12),dp(16),dp(18));
         scroll.addView(page);LinearLayout nav=Ui.row(this);Ui.Icon back=Ui.iconButton(this,"back",concept?"返回股票列表":"返回行业列表");back.setOnClickListener(v->finish());nav.addView(back,new LinearLayout.LayoutParams(dp(44),dp(44)));
-        TextView caption=label(concept?"概念板块":"行业板块",14);caption.setPadding(dp(10),0,0,0);nav.addView(caption,new LinearLayout.LayoutParams(0,-2,1));nav.addView(orientation.button(),new LinearLayout.LayoutParams(dp(64),dp(44)));nav.setPadding(dp(16),dp(12),dp(16),0);root.addView(nav,0,new LinearLayout.LayoutParams(-1,-2));Ui.gap(page,6);
+        TextView caption=label(concept?"概念板块":"行业板块",14);navigationCaption=caption;caption.setPadding(dp(10),0,0,0);nav.addView(caption,new LinearLayout.LayoutParams(0,-2,1));nav.addView(orientation.button(),new LinearLayout.LayoutParams(dp(64),dp(44)));nav.setPadding(dp(16),dp(12),dp(16),0);root.addView(nav,0,new LinearLayout.LayoutParams(-1,-2));Ui.gap(page,6);
         nav.addView(NotesDialogs.button(this,NotesStore.board(industry,concept),industry,null,()->{}),2,new LinearLayout.LayoutParams(dp(48),dp(44)));
         add(page,label(industry,28));Ui.gap(page,8);
         if(concept)try{ConceptCatalog catalog=new ConceptCatalog(this);catalog.update(this);JSONObject rank=catalog.rank(industry);add(page,label((rank==null?industry:catalog.tagText(rank))+" · 排名行情日 "+catalog.tradeDate()+" · 成员快照 "+catalog.memberDates.optString(industry,"—"),12));Ui.gap(page,8);}catch(Exception ignored){}
         source=label("正在读取内置板块行情…",13);add(page,source);
         Ui.gap(page,16);
         status=label("",13);add(page,status);
-        LinearLayout selected=Ui.card(page);add(selected,label("所选交易日",12));Ui.gap(selected,8);detail=label("",14);add(selected,detail);Ui.gap(selected,10);metricDetail=label("指标待加载",12);add(selected,metricDetail);
-        LinearLayout chartHeading=Ui.row(this);chartHeading.addView(label("板块日K",20),new LinearLayout.LayoutParams(0,-2,1));chartHeading.addView(orientation.button(true),new LinearLayout.LayoutParams(dp(92),dp(40)));LinearLayout.LayoutParams chartTitleParams=new LinearLayout.LayoutParams(-1,-2);chartTitleParams.setMargins(dp(3),dp(14),dp(3),dp(12));page.addView(chartHeading,chartTitleParams);LinearLayout chartCard=Ui.card(page);chartCard.setPadding(dp(8),dp(8),dp(8),dp(8));
-        chart=new BoardCandles();chart.setOnBarSelected(this::showBar);chartCard.addView(chart,new LinearLayout.LayoutParams(-1,dp(390)));
+        LinearLayout selected=Ui.card(page);selected.setTag("board-bar-detail");selectedHeading=label("所选交易日",12);add(selected,selectedHeading);Ui.gap(selected,8);detail=label("",14);add(selected,detail);Ui.gap(selected,10);metricDetail=label("指标待加载",12);add(selected,metricDetail);
+        LinearLayout chartHeading=Ui.row(this);chartTitle=label("板块日K",20);chartHeading.addView(chartTitle,new LinearLayout.LayoutParams(0,-2,1));chartHeading.addView(orientation.button(true),new LinearLayout.LayoutParams(dp(92),dp(40)));LinearLayout.LayoutParams chartTitleParams=new LinearLayout.LayoutParams(-1,-2);chartTitleParams.setMargins(dp(3),dp(14),dp(3),dp(12));page.addView(chartHeading,chartTitleParams);LinearLayout chartCard=Ui.card(page);chartCard.setPadding(dp(8),dp(8),dp(8),dp(8));
+        LinearLayout periods=Ui.row(this);periods.setTag("board-periods");for(int p:new int[]{0,7,30}){Button b=Ui.button(this,ChartPeriod.label(p),false);b.setTag("board-period:"+p);periods.addView(b,new LinearLayout.LayoutParams(0,dp(44),1));periodButtons.put(p,b);b.setOnClickListener(v->choosePeriod(p));}add(chartCard,periods);Ui.gap(chartCard,8);
+        chart=new BoardCandles();chart.setTag("board-candles");chart.setOnBarSelected(this::showBar);chartCard.addView(chart,new LinearLayout.LayoutParams(-1,dp(390)));
         LinearLayout ranges=Ui.row(this);ranges.setPadding(dp(4),dp(4),dp(4),dp(4));ranges.setBackground(Ui.shape(this,Ui.BG,12));add(chartCard,ranges);
         for(int count:new int[]{30,60,120,240}){Button button=Ui.button(this,count+"日",false);button.setTextSize(12);button.setTag(count);Ui.segment(button,count==60);rangeButtons.add(button);
             ranges.addView(button,new LinearLayout.LayoutParams(0,dp(44),1));button.setOnClickListener(v->{chart.setVisibleCount(count);for(Button b:rangeButtons)Ui.segment(b,b.getTag().equals(count));});}
@@ -78,17 +86,18 @@ public final class BoardChartActivity extends Activity implements TraderApplicat
         Ui.section(page,"广度图","50%参考线");LinearLayout breadthCard=Ui.card(page);breadthCard.setPadding(dp(8),dp(8),dp(8),dp(8));breadthChart=new IndustryMetricChart(this,false);breadthChart.setWindowListener((end,count,selectedIndex)->chart.setViewport(end,count,selectedIndex));breadthCard.addView(breadthChart,new LinearLayout.LayoutParams(-1,dp(218)));
         metricSource=label("正在读取强度与广度历史…",12);add(page,metricSource);Ui.gap(page,10);add(page,label("强度：成分股等权涨幅−主板非ST市场等权涨幅。广度：有效成员占比。三张图按同一日期联动拖动、缩放、点选；缺项留空。",12));
         Ui.gap(page,6);
-        add(page,label("填写电脑地址后每10分钟自动刷新；左右滑动查看历史，点选K线查看价格与成交量。",12));
+        add(page,label("手机直接同步板块可用的完整日K档案；周线和月线从日K汇总。左右滑动查看历史，点选K线查看上方数据。",12));
         Ui.section(page,"更新来源","可选");LinearLayout connectionCard=Ui.card(page);add(connectionCard,label("电脑局域网地址",15));Ui.gap(connectionCard,8);
         serverAddress=new EditText(this);serverAddress.setSingleLine(true);serverAddress.setTextSize(14);
         serverAddress.setHint("http://192.168.1.8:8000");serverAddress.setInputType(android.text.InputType.TYPE_CLASS_TEXT|android.text.InputType.TYPE_TEXT_VARIATION_URI);
         serverAddress.setText(getSharedPreferences(PREFS,MODE_PRIVATE).getString(SERVER_URL,""));add(connectionCard,serverAddress);Ui.gap(connectionCard,12);
-        Button refresh=Ui.button(this,"更新板块日K",true);refreshButton=refresh;add(connectionCard,refresh);
-        refresh.setOnClickListener(v->refreshFromDesktop(refresh));
+        Button refresh=Ui.button(this,"同步板块历史",true);refreshButton=refresh;add(connectionCard,refresh);
+        refresh.setOnClickListener(v->refreshData());
         if(orientation.landscape()&&getResources().getConfiguration().orientation==android.content.res.Configuration.ORIENTATION_LANDSCAPE){
+            selected.setPadding(dp(10),dp(6),dp(10),dp(6));selectedHeading.setVisibility(View.GONE);selected.getChildAt(1).getLayoutParams().height=0;selected.getChildAt(3).getLayoutParams().height=dp(3);detail.setTextSize(12);detail.setLineSpacing(0,1);metricDetail.setTextSize(11);metricDetail.setLineSpacing(0,1);
             page.removeAllViews();page.setPadding(dp(12),dp(4),dp(12),dp(8));nav.setPadding(dp(12),dp(4),dp(12),0);caption.setText(industry+" · "+(concept?"概念日K":"行业日K"));Ui.compact(caption);
-            chart.getLayoutParams().height=dp(Math.max(210,getResources().getConfiguration().screenHeightDp-150));add(page,chartCard);
-            add(page,selected);Ui.section(page,"强度图 / 广度图","同日期联动");LinearLayout metrics=Ui.row(this);metrics.setGravity(android.view.Gravity.TOP);metrics.addView(strengthCard,new LinearLayout.LayoutParams(0,-2,1));metrics.addView(breadthCard,new LinearLayout.LayoutParams(0,-2,1));add(page,metrics);
+            chart.getLayoutParams().height=dp(Math.max(210,getResources().getConfiguration().screenHeightDp-150));add(page,selected);add(page,chartCard);
+            Ui.section(page,"强度图 / 广度图","同日期联动");LinearLayout metrics=Ui.row(this);metrics.setGravity(android.view.Gravity.TOP);metrics.addView(strengthCard,new LinearLayout.LayoutParams(0,-2,1));metrics.addView(breadthCard,new LinearLayout.LayoutParams(0,-2,1));add(page,metrics);
             add(page,metricSource);add(page,source);add(page,status);add(page,connectionCard);
         }
         page.setFocusableInTouchMode(true);page.requestFocus();
@@ -97,14 +106,14 @@ public final class BoardChartActivity extends Activity implements TraderApplicat
         refreshData();
     }
 
-    @Override protected void onSaveInstanceState(Bundle out){if(orientation!=null)orientation.save(out);if(chart!=null){out.putInt("chart_end",chart.endIndex);out.putInt("chart_count",chart.visibleCount);out.putInt("chart_selected",chart.selected);}super.onSaveInstanceState(out);}
+    @Override protected void onSaveInstanceState(Bundle out){if(orientation!=null)orientation.save(out);if(chart!=null){out.putInt("chart_end",chart.endIndex);out.putInt("chart_count",chart.visibleCount);out.putInt("chart_selected",chart.selected);periodWindows.put(period,new int[]{chart.endIndex,chart.visibleCount,chart.selected});out.putInt("board_period",period);for(int p:new int[]{0,7,30})out.putIntArray("board_window:"+p,periodWindows.get(p));}super.onSaveInstanceState(out);}
     @Override protected void onStart(){super.onStart();getSharedPreferences("scan",MODE_PRIVATE).registerOnSharedPreferenceChangeListener(historyChanges);loadIndicators();}
     @Override protected void onStop(){getSharedPreferences("scan",MODE_PRIVATE).unregisterOnSharedPreferenceChangeListener(historyChanges);super.onStop();}
     @Override protected void onResume(){super.onResume();
         if(android.os.SystemClock.elapsedRealtime()-lastRefresh>=RefreshSchedule.INTERVAL_MS)refreshData();}
     @Override public void refreshData(){
         loadIndicators();
-        if(serverAddress!=null&&!serverAddress.getText().toString().trim().isEmpty())refreshFromDesktop(refreshButton);
+        if(serverAddress!=null&&!serverAddress.getText().toString().trim().isEmpty())refreshFromDesktop(refreshButton);else refreshOnline();
     }
     private void loadIndicators(){if(metricSource==null)return;
         try{JSONObject payload=SectorHistoryStore.load(this,industry,concept);JSONArray rows=payload.getJSONArray("data");Map<String,JSONObject> loaded=new HashMap<>();for(int i=0;i<rows.length();i++){JSONObject r=rows.optJSONObject(i);if(r!=null&&r.optString("date").matches("\\d{4}-\\d{2}-\\d{2}"))loaded.put(r.getString("date"),r);}
@@ -125,9 +134,9 @@ public final class BoardChartActivity extends Activity implements TraderApplicat
     private void loadSnapshot(){
         try{
             JSONObject index=new JSONObject(utf8(read(getAssets().open(concept?"concept_kline_index.json":"board_kline_index.json"))));
-            String code=index.getJSONObject("boards").optString(industry,"");
+            String code=index.getJSONObject("boards").optString(industry,"");boardCode=code;
             if(code.isEmpty())throw new Exception("内置快照暂无该板块");
-            JSONObject payload=new JSONObject(utf8(read(getAssets().open((concept?"concept_klines/":"board_klines/")+code+".json"))));
+            JSONObject payload=BoardHistoryClient.cached(this,code,concept);
             List<Bar> loaded=parseRows(payload.getJSONArray("data"));
             if(loaded.isEmpty())throw new Exception("该板块暂无有效日K");
             show(loaded,payload.optString("source","同花顺行业板块日K（内置快照）"),payload.optString("latest_date",""));
@@ -162,9 +171,9 @@ public final class BoardChartActivity extends Activity implements TraderApplicat
             }finally{if(connection!=null)connection.disconnect();}
         },"board-kline-refresh").start();
     }
-    private static List<Bar> parseRows(JSONArray data){
+    static List<Bar> parseRows(JSONArray data){
         List<Bar> parsed=new ArrayList<>();
-        for(int i=Math.max(0,data.length()-240);i<data.length();i++){
+        for(int i=0;i<data.length();i++){
             JSONArray compact=data.optJSONArray(i);JSONObject row=data.optJSONObject(i);
             String date=compact!=null?compact.optString(0):row==null?"":row.optString("date");
             double open=compact!=null?compact.optDouble(1,Double.NaN):row==null?Double.NaN:row.optDouble("open",Double.NaN);
@@ -177,7 +186,7 @@ public final class BoardChartActivity extends Activity implements TraderApplicat
                     ||!Double.isFinite(close)||!Double.isFinite(volume)||low<=0||high<low||volume<0)continue;
             parsed.add(new Bar(date,open,high,low,close,volume,amount));
         }
-        return parsed;
+        java.util.TreeMap<String,Bar> sorted=new java.util.TreeMap<>();for(Bar b:parsed)try{java.time.LocalDate.parse(b.date);sorted.put(b.date,b);}catch(Exception ignored){}return new ArrayList<>(sorted.values());
     }
     private static String quantity(double value){
         if(!Double.isFinite(value))return "—";
@@ -186,21 +195,26 @@ public final class BoardChartActivity extends Activity implements TraderApplicat
         return String.format(Locale.CHINA,"%.0f",value);
     }
     private void show(List<Bar> loaded,String feed,String latest){
-        bars=loaded;chart.setBars(bars);if(strengthChart!=null){strengthChart.setData(bars,indicators);breadthChart.setData(bars,indicators);syncMetricWindow();}
-        source.setText(feed.replace("概念板块日K","概念").replace("行业板块日K","行业").replace("（内置快照）"," · 内置快照")+"\n截至 "+latest+" · "+bars.size()+"个交易日");
+        dailyBars=loaded;showPeriod();
+        source.setText(feed.replace("概念板块日K","概念").replace("行业板块日K","行业").replace("（内置快照）"," · 内置快照")+"\n"+dailyBars.get(0).date+"—"+latest+" · "+dailyBars.size()+"个交易日");
         showBar(chart.selected);
     }
+    private void choosePeriod(int chosen){if(period==chosen)return;periodWindows.put(period,new int[]{chart.endIndex,chart.visibleCount,chart.selected});period=chosen;chart.rows=new ArrayList<>();showPeriod();int[] remembered=periodWindows.get(period);if(remembered!=null)chart.setViewport(remembered[0],remembered[1],remembered[2]);else chart.setVisibleCount(60);for(Button b:rangeButtons)Ui.segment(b,(Integer)b.getTag()==chart.visibleCount);showBar(chart.selected);}
+    private void showPeriod(){List<DailyBar> daily=new ArrayList<>();for(Bar b:dailyBars)daily.add(new DailyBar(b.date,b.open,b.high,b.low,b.close,b.volume));ChartPeriod.Series series=ChartPeriod.aggregate(daily,period);spans.clear();spans.putAll(series.spans);List<Bar> converted=new ArrayList<>();int offset=0;for(DailyBar b:series.bars){double amount=0;boolean valid=true;while(offset<dailyBars.size()&&dailyBars.get(offset).date.compareTo(b.date)<=0){Bar original=dailyBars.get(offset++);if(Double.isFinite(original.amount))amount+=original.amount;else valid=false;}converted.add(new Bar(b.date,b.open,b.high,b.low,b.close,b.volume,valid?amount:Double.NaN));}bars=converted;chart.setBars(bars);chart.setContentDescription((concept?"概念":"行业")+"板块"+ChartPeriod.label(period)+"与成交量图");for(Map.Entry<Integer,Button> p:periodButtons.entrySet())Ui.segment(p.getValue(),p.getKey()==period);selectedHeading.setText(period==0?"所选交易日":"所选"+ChartPeriod.label(period)+" · 首日开盘 / 末日收盘");chartTitle.setText("板块"+ChartPeriod.label(period));if(orientation.landscape())navigationCaption.setText(industry+" · "+(concept?"概念":"行业")+ChartPeriod.label(period));for(Button b:rangeButtons)b.setText(b.getTag()+ChartPeriod.unit(period));if(strengthChart!=null){strengthChart.setData(bars,indicators);breadthChart.setData(bars,indicators);syncMetricWindow();}showBar(chart.selected);}
+    private void refreshOnline(){if(loading||boardCode.isEmpty())return;loading=true;lastRefresh=android.os.SystemClock.elapsedRealtime();refreshButton.setEnabled(false);status.setText("正在同步板块完整日K历史…");loader=new Thread(()->{try{JSONObject payload=BoardHistoryClient.sync(this,boardCode,concept,message->runOnUiThread(()->{if(!isDestroyed())status.setText(message);}));List<Bar> loaded=parseRows(payload.getJSONArray("data"));if(loaded.isEmpty())throw new Exception("板块日K为空");runOnUiThread(()->{if(isDestroyed()||isFinishing())return;show(loaded,payload.optString("source"),payload.optString("latest_date"));status.setText("全历史同步完成 · "+loaded.size()+"个交易日");loading=false;refreshButton.setEnabled(true);});}catch(Exception e){runOnUiThread(()->{if(isDestroyed()||isFinishing())return;status.setText("历史更新未完成："+e.getMessage()+"；保留可用档案及原图表。");loading=false;refreshButton.setEnabled(true);});}},"board-history");loader.start();}
+    @Override protected void onDestroy(){if(loader!=null)loader.interrupt();super.onDestroy();}
     private void showBar(int index){
         if(index<0||index>=bars.size())return;
         Bar bar=bars.get(index),prior=index>0?bars.get(index-1):null;
         double change=prior!=null&&prior.close>0?(bar.close/prior.close-1)*100:Double.NaN;
         String changeText=Double.isFinite(change)?String.format(Locale.CHINA,"%+.2f%%",change):"—";
-        String value=bar.date+String.format(Locale.CHINA,"\n开  %.2f    高  %.2f\n低  %.2f    收  %.2f",bar.open,bar.high,bar.low,bar.close)
-                +"\n涨跌  "+changeText+"  ·  成交量 "+quantity(bar.volume)+"\n成交额  "+quantity(bar.amount);
+        boolean wide=orientation.landscape()&&getResources().getConfiguration().orientation==android.content.res.Configuration.ORIENTATION_LANDSCAPE;
+        String value=(period==0?bar.date:ChartPeriod.label(period)+" · "+spans.getOrDefault(bar.date,bar.date))+String.format(Locale.CHINA,wide?"  开 %.2f  高 %.2f  低 %.2f  收 %.2f":"\n开  %.2f    高  %.2f\n低  %.2f    收  %.2f",bar.open,bar.high,bar.low,bar.close)
+                +(wide?"  涨跌 ":"\n涨跌  ")+changeText+"  ·  成交量 "+quantity(bar.volume)+(wide?"  · 成交额 ":"\n成交额  ")+quantity(bar.amount);
         android.text.SpannableString styled=new android.text.SpannableString(value);int start=value.indexOf(changeText,value.indexOf("涨跌"));
         if(Double.isFinite(change))styled.setSpan(new android.text.style.ForegroundColorSpan(change>=0?red:green),start,start+changeText.length(),android.text.Spanned.SPAN_EXCLUSIVE_EXCLUSIVE);
         detail.setTextColor(Ui.INK);detail.setText(styled);
-        JSONObject r=indicators.get(bar.date);if(metricDetail!=null)metricDetail.setText("同日强度（百分点）  5日 "+metric(r,"relative_5d",true)+" / 20日 "+metric(r,"relative_20d",true)+"\n同日广度  跑赢市场 "+metric(r,"outperform_5d_pct",false)+" / 站上MA20 "+metric(r,"above_ma20_pct",false)+(r==null?"\n该日期没有指标历史，缺项留空":"\n有效样本：5日 "+r.optInt("covered_5d")+" / 20日 "+r.optInt("covered_20d")+" / MA20 "+r.optInt("ma20_covered")));
+        JSONObject r=indicators.get(bar.date);if(metricDetail!=null)metricDetail.setText((period==0?"同日":"该周期末日")+"强度（百分点）  5日 "+metric(r,"relative_5d",true)+" / 20日 "+metric(r,"relative_20d",true)+(wide?"  · 广度 ":"\n同日广度  ")+"跑赢市场 "+metric(r,"outperform_5d_pct",false)+" / 站上MA20 "+metric(r,"above_ma20_pct",false)+(r==null?"\n该日期没有指标历史，缺项留空":"\n有效样本：5日 "+r.optInt("covered_5d")+" / 20日 "+r.optInt("covered_20d")+" / MA20 "+r.optInt("ma20_covered")));
         syncMetricWindow();
     }
 
@@ -222,8 +236,10 @@ public final class BoardChartActivity extends Activity implements TraderApplicat
         void setOnBarSelected(OnBarSelected callback){listener=callback;}
         void setBars(List<Bar> data){
             boolean first=rows.isEmpty(),atLatest=endIndex>=rows.size(),selectedLatest=selected==rows.size()-1;
+            String endDate=endIndex>0&&endIndex<=rows.size()?rows.get(endIndex-1).date:null;
             String selectedDate=selected>=0&&selected<rows.size()?rows.get(selected).date:null;
             rows=data;endIndex=first||atLatest?rows.size():Math.min(endIndex,rows.size());
+            if(!first&&!atLatest&&endDate!=null)for(int i=0;i<rows.size();i++)if(endDate.equals(rows.get(i).date)){endIndex=i+1;break;}
             selected=first||selectedLatest?rows.size()-1:Math.min(selected,rows.size()-1);
             if(!first&&!selectedLatest&&selectedDate!=null)for(int i=0;i<rows.size();i++)if(selectedDate.equals(rows.get(i).date)){selected=i;break;}
             invalidate();

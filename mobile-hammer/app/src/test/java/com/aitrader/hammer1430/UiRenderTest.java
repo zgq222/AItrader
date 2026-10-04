@@ -20,7 +20,7 @@ import static org.junit.Assert.*;
 
 /** Real native View rendering with Skia; test snapshots never ship in the APK. */
 @RunWith(RobolectricTestRunner.class)
-@Config(sdk=35,application=Application.class,qualifiers="w390dp-h844dp-xxhdpi")
+@Config(sdk=35,application=Application.class,qualifiers="w390dp-h844dp-xxhdpi",shadows=TradingFeaturesTest.FakeBoard.class)
 @GraphicsMode(GraphicsMode.Mode.NATIVE)
 public class UiRenderTest {
     private JSONObject fixture;

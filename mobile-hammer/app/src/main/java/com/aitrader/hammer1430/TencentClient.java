@@ -44,7 +44,7 @@ final class TencentClient {
             }catch(Exception error){last=error;Thread.sleep(500L*(attempt+1));}
             finally{if(connection!=null)connection.disconnect();}
         }
-        throw new Exception("腾讯行情连接失败："+last.getMessage(),last);
+        throw new Exception("行情连接失败："+last.getMessage(),last);
     }
     private static double value(String[] fields,int index){try{return Double.parseDouble(fields[index]);}catch(Exception e){return Double.NaN;}}
     private static long timestamp(String raw){
@@ -147,6 +147,46 @@ final class TencentClient {
     private static List<DailyBar> historySymbol(String key,String throughDate)throws Exception {
         return historySymbol(key,throughDate,120);
     }
+    static List<DailyBar> minutes(String code,int interval)throws Exception {
+        if(interval==15)return minutes(code);if(interval!=5||!code.matches("\\d{6}"))throw new IOException("分钟周期或股票代码无效");
+        // Sina provides 1,970 bars (about 41 sessions), enough for a 20-day baseline.
+        // Both sources are normalized to shares before they enter the shared cache.
+        try{return parseSinaFive(new String(get("https://money.finance.sina.com.cn/quotes_service/api/json_v2.php/CN_MarketData.getKLineData?symbol="+symbol(code)+"&scale=5&ma=no&datalen=1970"),StandardCharsets.UTF_8));}catch(Exception primary){if(Thread.currentThread().isInterrupted())throw primary;}
+        String uri="https://push2his.eastmoney.com/api/qt/stock/kline/get?secid="+(code.startsWith("6")?"1.":"0.")+code+"&klt=5&fqt=0&beg=0&end=20500101&lmt=10000&fields1=f1,f2,f3,f4,f5,f6&fields2=f51,f52,f53,f54,f55,f56,f57,f58,f59,f60,f61";
+        return parseFiveMinutes(new String(get(uri),StandardCharsets.UTF_8),code);
+    }
+    static List<DailyBar> parseSinaFive(String raw)throws Exception {
+        JSONArray rows=new JSONArray(raw);TreeMap<String,DailyBar> sorted=new TreeMap<>();
+        for(int i=0;i<rows.length();i++)try{JSONObject r=rows.getJSONObject(i);String stamp=r.getString("day");if(!stamp.matches("\\d{4}-\\d{2}-\\d{2} \\d{2}:\\d{2}:00"))continue;String time=stamp.substring(0,16);java.time.LocalDateTime parsed=java.time.LocalDateTime.parse(time,MinuteBehavior.FORMAT);if(!MinuteBehavior.isBarTime(parsed.toLocalTime(),5))continue;
+            double o=r.getDouble("open"),h=r.getDouble("high"),l=r.getDouble("low"),c=r.getDouble("close"),v=r.getDouble("volume");if(!Double.isFinite(o)||!Double.isFinite(h)||!Double.isFinite(l)||!Double.isFinite(c)||!Double.isFinite(v)||l<=0||v<0||h<Math.max(o,c)||l>Math.min(o,c))continue;sorted.put(time,new DailyBar(time,o,h,l,c,v));
+        }catch(Exception ignored){}if(sorted.isEmpty())throw new IOException("5分钟K线为空或格式无效");return new ArrayList<>(sorted.values());
+    }
+    static List<DailyBar> parseFiveMinutes(String raw,String code)throws Exception {
+        JSONObject root=new JSONObject(raw),data=root.optJSONObject("data");if(root.optInt("rc",-1)!=0||data==null||!code.equals(data.optString("code")))throw new IOException("5分钟K线数据不可用");
+        JSONArray values=data.optJSONArray("klines");if(values==null)throw new IOException("5分钟K线为空");TreeMap<String,DailyBar> sorted=new TreeMap<>();
+        for(int i=0;i<values.length();i++)try{String[] row=values.getString(i).split(",");if(row.length<6||!row[0].matches("\\d{4}-\\d{2}-\\d{2} \\d{2}:\\d{2}"))continue;
+            java.time.LocalDateTime time=java.time.LocalDateTime.parse(row[0],MinuteBehavior.FORMAT);if(!MinuteBehavior.isBarTime(time.toLocalTime(),5))continue;
+            double o=Double.parseDouble(row[1]),c=Double.parseDouble(row[2]),h=Double.parseDouble(row[3]),l=Double.parseDouble(row[4]),v=Double.parseDouble(row[5]);
+            if(!Double.isFinite(o)||!Double.isFinite(c)||!Double.isFinite(h)||!Double.isFinite(l)||!Double.isFinite(v)||l<=0||v<0||h<Math.max(o,c)||l>Math.min(o,c))continue;
+            sorted.put(row[0],new DailyBar(row[0],o,h,l,c,v*100));
+        }catch(Exception ignored){}if(sorted.isEmpty())throw new IOException("5分钟K线为空或格式无效");return new ArrayList<>(sorted.values());
+    }
+    interface Progress {void update(String message);}
+    interface DayPage {List<DailyBar> fetch(String through)throws Exception;}
+    static List<DailyBar> fullHistory(String code,String through,Progress progress)throws Exception {
+        if(!code.matches("\\d{6}"))throw new IOException("股票代码无效");
+        return downloadFull(through,cursor->historyPage(symbol(code),cursor,2000),progress);
+    }
+    static List<DailyBar> downloadFull(String through,DayPage source,Progress progress)throws Exception {
+        String cursor=through;TreeMap<String,DailyBar> all=new TreeMap<>();
+        while(true){if(Thread.currentThread().isInterrupted())throw new InterruptedException("历史同步已中断");
+            List<DailyBar> page=source.fetch(cursor);if(page.isEmpty())break;
+            String oldest=page.get(0).date;if(oldest.compareTo(cursor)>0||(!all.isEmpty()&&oldest.compareTo(all.firstKey())>=0))throw new IOException("历史数据源未向前分页，完整同步未完成");
+            for(DailyBar b:page)if(b.date.compareTo(cursor)<=0)all.put(b.date,b);
+            if(progress!=null)progress.update("正在同步完整日K · 已读取"+all.size()+"根 · 回溯至"+oldest);
+            cursor=java.time.LocalDate.parse(oldest).minusDays(1).toString();
+        }if(all.isEmpty())throw new IOException("历史日K为空");return new ArrayList<>(all.values());
+    }
     private static List<DailyBar> historySymbol(String key,String throughDate,int count)throws Exception {
         String uri="https://web.ifzq.gtimg.cn/appstock/app/kline/kline?param="+key+",day,,,"+count;
         JSONObject root=new JSONObject(new String(get(uri),StandardCharsets.UTF_8));
@@ -163,5 +203,13 @@ final class TencentClient {
             catch(Exception ignored){}
         }
         return result;
+    }
+    private static List<DailyBar> historyPage(String key,String through,int count)throws Exception {
+        String uri="https://web.ifzq.gtimg.cn/appstock/app/kline/kline?param="+key+",day,,"+through+","+count;
+        JSONObject root=new JSONObject(new String(get(uri),StandardCharsets.UTF_8));if(root.optInt("code",-1)!=0)throw new IOException("历史日K接口异常："+root.optString("msg"));
+        JSONObject data=root.optJSONObject("data"),stock=data==null?null:data.optJSONObject(key);JSONArray rows=stock==null?null:stock.optJSONArray("day");if(rows==null)throw new IOException("历史日K返回格式异常");
+        TreeMap<String,DailyBar> sorted=new TreeMap<>();for(int i=0;i<rows.length();i++){JSONArray r=rows.getJSONArray(i);String date=r.getString(0);java.time.LocalDate.parse(date);double o=r.getDouble(1),c=r.getDouble(2),h=r.getDouble(3),l=r.getDouble(4),v=r.length()>5?r.getDouble(5):Double.NaN;
+            if(date.compareTo(through)>0||!Double.isFinite(o)||!Double.isFinite(c)||!Double.isFinite(h)||!Double.isFinite(l)||l<=0||h<Math.max(o,c)||l>Math.min(o,c))throw new IOException("历史日K记录无效");sorted.put(date,new DailyBar(date,o,h,l,c,v));}
+        return new ArrayList<>(sorted.values());
     }
 }

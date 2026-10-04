@@ -17,7 +17,7 @@ import java.util.*;
 import static org.junit.Assert.*;
 
 @RunWith(RobolectricTestRunner.class)
-@Config(sdk=35,application=Application.class,qualifiers="w390dp-h844dp-xxhdpi")
+@Config(sdk=35,application=Application.class,qualifiers="w390dp-h844dp-xxhdpi",shadows=TradingFeaturesTest.FakeBoard.class)
 @GraphicsMode(GraphicsMode.Mode.NATIVE)
 public class BoardMetricsTest {
     @Test public void conceptCandlesAndMetricsUseConceptSnapshots()throws Exception {

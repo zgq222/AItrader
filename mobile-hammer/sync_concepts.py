@@ -32,7 +32,7 @@ def export():
         references[name] = rows[-30:]
         cache["histories"].pop(name, None)
         with (concepts.BOARD_DIR / f"{concepts.safe_name(name)}.csv").open(encoding="utf-8-sig", newline="") as handle:
-            raw = list(csv.DictReader(handle))[-240:]
+            raw = list(csv.DictReader(handle))
         candles = []
         for row in raw:
             values = [number(row.get(key)) for key in ("开盘价", "最高价", "最低价", "收盘价", "成交量", "成交额")]

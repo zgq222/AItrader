@@ -21,32 +21,41 @@ final class MinuteBehavior {
     }
     static long epoch(String stamp){try{return LocalDateTime.parse(stamp,FORMAT).atZone(ZONE).toInstant().toEpochMilli();}catch(Exception e){return Long.MAX_VALUE;}}
     static boolean isBarTime(LocalTime time){int minute=time.getHour()*60+time.getMinute();return minute%MINUTES==0&&((minute>=570+MINUTES&&minute<=690)||(minute>=780+MINUTES&&minute<=900));}
-    private static boolean validTime(String stamp){try{return isBarTime(LocalDateTime.parse(stamp,FORMAT).toLocalTime());}catch(Exception e){return false;}}
+    static boolean isBarTime(LocalTime time,int interval){int minute=time.getHour()*60+time.getMinute();return (interval==5||interval==15)&&minute%interval==0&&((minute>=570+interval&&minute<=690)||(minute>=780+interval&&minute<=900));}
+    private static boolean validTime(String stamp,int interval){try{return isBarTime(LocalDateTime.parse(stamp,FORMAT).toLocalTime(),interval);}catch(Exception e){return false;}}
     private static boolean validBar(DailyBar b){return Double.isFinite(b.open)&&Double.isFinite(b.high)&&Double.isFinite(b.low)&&Double.isFinite(b.close)&&Double.isFinite(b.volume)&&b.low>0&&b.volume>=0&&b.high>=Math.max(b.open,b.close)&&b.low<=Math.min(b.open,b.close);}
     static Map<String,Double> baselines(List<DailyBar> bars,long now){
+        return baselines(bars,now,15);
+    }
+    static Map<String,Double> baselines(List<DailyBar> bars,long now,int interval){
+        if(interval!=5&&interval!=15)throw new IllegalArgumentException("仅支持5/15分钟");int perDay=240/interval;
         SortedMap<String,SortedMap<String,Double>> days=new TreeMap<>();
-        for(DailyBar b:bars)if(validTime(b.date)&&validBar(b)&&epoch(b.date)<=now)
+        for(DailyBar b:bars)if(validTime(b.date,interval)&&validBar(b)&&epoch(b.date)<=now)
             days.computeIfAbsent(b.date.substring(0,10),key->new TreeMap<>()).put(b.date,b.volume);
         List<double[]> complete=new ArrayList<>();Map<String,Double> result=new HashMap<>();
         for(Map.Entry<String,SortedMap<String,Double>> day:days.entrySet()){
             if(complete.size()>=20){
-                double[] sample=new double[20*16];int at=0;
+                double[] sample=new double[20*perDay];int at=0;
                 for(int i=complete.size()-20;i<complete.size();i++)for(double v:complete.get(i))sample[at++]=v;
-                Arrays.sort(sample);result.put(day.getKey(),(sample[159]+sample[160])/2);
+                Arrays.sort(sample);result.put(day.getKey(),(sample[sample.length/2-1]+sample[sample.length/2])/2);
             }
-            if(day.getValue().size()==16)complete.add(day.getValue().values().stream().mapToDouble(Double::doubleValue).toArray());
+            if(day.getValue().size()==perDay)complete.add(day.getValue().values().stream().mapToDouble(Double::doubleValue).toArray());
         }
         return result;
     }
     static List<Zone> find(List<DailyBar> bars,long now){return find(bars,now,baselines(bars,now));}
     static List<Zone> find(List<DailyBar> bars,long now,Map<String,Double> baselines){
+        return find(bars,now,baselines,15);
+    }
+    static List<Zone> find(List<DailyBar> bars,long now,int interval){return find(bars,now,baselines(bars,now,interval),interval);}
+    static List<Zone> find(List<DailyBar> bars,long now,Map<String,Double> baselines,int interval){
         List<Zone> zones=new ArrayList<>();
         for(int i=0;i<bars.size();i++){
-            DailyBar b=bars.get(i);if(!validTime(b.date)||!validBar(b)||epoch(b.date)>now)continue;
+            DailyBar b=bars.get(i);if(!validTime(b.date,interval)||!validBar(b)||epoch(b.date)>now)continue;
             double baseline=baselines.getOrDefault(b.date.substring(0,10),0.0),ratio=b.volume/baseline;
             if(baseline<=0||ratio<2.5)continue;
             Zone last=zones.isEmpty()?null:zones.get(zones.size()-1);
-            boolean merge=last!=null&&last.end==i-1&&b.date.substring(0,10).equals(bars.get(last.end).date.substring(0,10))&&epoch(b.date)-epoch(bars.get(last.end).date)==INTERVAL_MS;
+            boolean merge=last!=null&&last.end==i-1&&b.date.substring(0,10).equals(bars.get(last.end).date.substring(0,10))&&epoch(b.date)-epoch(bars.get(last.end).date)==interval*60_000L;
             int start=merge?last.start:i;double open=bars.get(start).open,move=(b.close/open-1)*100;
             int kind=b.close>open?ATTACK:b.close<open?REDUCE:VOLUME;
             Zone zone=new Zone(start,i,kind,merge?Math.max(last.ratio,ratio):ratio,move,merge?Math.min(last.low,b.low):b.low,merge?Math.max(last.high,b.high):b.high);
@@ -62,4 +71,5 @@ final class MinuteBehavior {
         }
         return zones;
     }
+    static String rules(int interval){return interval==15?RULES:RULES.replace("周期使用15分钟","周期使用5分钟").replace("15分钟K线","5分钟K线").replace("共320根","共960根").replace("相隔15分钟","相隔5分钟").replace("09:45代表09:30—09:45","09:35代表09:30—09:35").replace("15分钟合并了更短周期的波动，因此结果不会与5分钟逐根相同。","5分钟与15分钟分别使用各自周期的成交量基准，框选结果按各自K线计算。");}
 }

@@ -1,4 +1,4 @@
-"""Bundle recent local THS industry daily bars for the Android board chart."""
+"""Bundle all available local THS industry daily bars for the Android board chart."""
 
 from __future__ import annotations
 
@@ -12,7 +12,6 @@ ROOT = Path(__file__).resolve().parent.parent
 SOURCE = ROOT / "板块" / "行业板块"
 ASSETS = Path(__file__).resolve().parent / "app" / "src" / "main" / "assets"
 BOARD_ASSETS = ASSETS / "board_klines"
-MAX_BARS = 240
 
 
 def number(value: str) -> float | None:
@@ -29,7 +28,7 @@ def export() -> tuple[int, str]:
     latest = ""
     for path in sorted(SOURCE.glob("*.csv")):
         with path.open(encoding="utf-8-sig", newline="") as source:
-            raw = list(csv.DictReader(source))[-MAX_BARS:]
+            raw = list(csv.DictReader(source))
         if not raw:
             continue
         code = str(raw[-1]["板块代码"]).strip()

@@ -20,7 +20,7 @@ import org.robolectric.shadows.ShadowAlertDialog;
 import static org.junit.Assert.*;
 
 @RunWith(RobolectricTestRunner.class)
-@Config(sdk=35,application=Application.class,qualifiers="w390dp-h844dp-xxhdpi",shadows=TradingFeaturesTest.FakeTencent.class)
+@Config(sdk=35,application=Application.class,qualifiers="w390dp-h844dp-xxhdpi",shadows={TradingFeaturesTest.FakeTencent.class,TradingFeaturesTest.FakeBoard.class})
 @GraphicsMode(GraphicsMode.Mode.NATIVE)
 public class PersonalDataTest {
     private Context app;

@@ -13,6 +13,8 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.Locale;
 import java.util.TreeMap;
+import java.util.Map;
+import java.util.HashMap;
 
 /** Stock detail using the APK's existing daily price source and shared cache. */
 public final class StockChartActivity extends Activity implements TraderApplication.Refreshable {
@@ -22,15 +24,17 @@ public final class StockChartActivity extends Activity implements TraderApplicat
     private static final int[] DAILY_RANGES={30,60,120,240};
     private LinearLayout dailyRanges;
     private int dailyRange=60;
-    private int[] dailyViewport,minuteViewport;
-    // Fetch extra sessions to cover two calendar years, including data-source gaps.
-    private static final int DAILY_HISTORY_BARS=750;
+    private final Map<Integer,int[]> viewports=new HashMap<>();
+    private final Map<Integer,Integer> ranges=new HashMap<>();
+    private final Map<Integer,Button> periodButtons=new HashMap<>();
+    private int period=ChartPeriod.DAY;
+    private Thread loader;
     private TextView status,detail,priceLabel,changeLabel,stopLabel,selectedHeading;
     private LinearLayout behaviorBox;
     private Button dailyButton,minuteButton,holdingButton;
     private boolean minuteMode;
     private int generation;
-    private final List<DailyBar> dailyRows=new ArrayList<>(),minuteRows=new ArrayList<>();
+    private final List<DailyBar> dailyRows=new ArrayList<>(),minuteRows=new ArrayList<>(),fiveRows=new ArrayList<>();
     private StockChartView chart;
     private String stockCode,stockName;
     private boolean loading;
@@ -49,7 +53,8 @@ public final class StockChartActivity extends Activity implements TraderApplicat
         if(code==null||!code.matches("\\d{6}")){finish();return;}
         if(name==null||name.isEmpty())name=code;
         stockCode=code;stockName=name;minuteMode=state!=null?state.getBoolean("minute",false):getIntent().getBooleanExtra(EXTRA_MINUTE,false);restoredViewport=state==null?null:state.getIntArray("chart_viewport");focusTime=state==null?getIntent().getStringExtra(EXTRA_FOCUS):null;
-        if(state!=null){dailyRange=state.getInt("daily_range",60);dailyViewport=state.getIntArray("daily_viewport");minuteViewport=state.getIntArray("minute_viewport");}
+        period=state==null?(minuteMode?ChartPeriod.FIFTEEN:ChartPeriod.DAY):state.getInt("chart_period",minuteMode?ChartPeriod.FIFTEEN:ChartPeriod.DAY);minuteMode=ChartPeriod.minute(period);
+        if(state!=null){for(int p:new int[]{0,5,15,7,30}){viewports.put(p,state.getIntArray("viewport:"+p));ranges.put(p,state.getInt("range:"+p,60));}dailyRange=ranges.getOrDefault(period,60);}
         if(getIntent().getBooleanExtra("holding_risk",false))try{PersonalSignalStore.acknowledge(this,code);}catch(Exception ignored){}
         LinearLayout root=Ui.column(this);setContentView(root);Ui.install(this,root);
         ScrollView scroll=new ScrollView(this);scroll.setTag("chart-scroll");scroll.setFillViewport(true);root.addView(scroll,new LinearLayout.LayoutParams(-1,0,1));
@@ -83,8 +88,9 @@ public final class StockChartActivity extends Activity implements TraderApplicat
         LinearLayout holdings=Ui.card(page);LinearLayout holdingRow=Ui.row(this);stopLabel=text("加入持仓后可设置止损线",13);holdingRow.addView(stopLabel,new LinearLayout.LayoutParams(0,-2,1));holdingButton=Ui.button(this,"＋ 持仓",false);holdingRow.addView(holdingButton,new LinearLayout.LayoutParams(dp(106),dp(44)));Ui.add(holdings,holdingRow);
         holdingButton.setOnClickListener(v->{try{if(HoldingsStore.find(this,stockCode)==null)HoldingDialogs.add(this,stockCode,stockName,new IndustryCatalog(this).industry(stockCode),this::updateStop);else HoldingDialogs.editStop(this,stockCode,this::updateStop);}catch(Exception e){android.widget.Toast.makeText(this,e.getMessage(),android.widget.Toast.LENGTH_LONG).show();}});
         holdingButton.setOnLongClickListener(v->{try{if(HoldingsStore.find(this,stockCode)==null)return false;HoldingDialogs.manage(this,stockCode,stockName,this::updateStop);return true;}catch(Exception e){NotesDialogs.error(this,e);return true;}});
-        LinearLayout periods=Ui.row(this);periods.setPadding(dp(4),dp(4),dp(4),dp(4));periods.setBackground(Ui.shape(this,Ui.LINE,12));dailyButton=Ui.button(this,"日K",false);minuteButton=Ui.button(this,"15分钟K线",false);dailyButton.setContentDescription("切换日K");minuteButton.setContentDescription("切换15分钟K线");periods.addView(dailyButton,new LinearLayout.LayoutParams(0,dp(44),1));periods.addView(minuteButton,new LinearLayout.LayoutParams(0,dp(44),1));Ui.add(page,periods);Ui.gap(page,16);
-        dailyButton.setOnClickListener(v->choosePeriod(false));minuteButton.setOnClickListener(v->choosePeriod(true));
+        LinearLayout periods=Ui.row(this);periods.setTag("chart-periods");periods.setPadding(dp(4),dp(4),dp(4),dp(4));periods.setBackground(Ui.shape(this,Ui.LINE,12));
+        for(int p:new int[]{ChartPeriod.FIVE,ChartPeriod.FIFTEEN,ChartPeriod.DAY,ChartPeriod.WEEK,ChartPeriod.MONTH}){Button b=Ui.button(this,ChartPeriod.label(p),false);b.setSingleLine(true);b.setPadding(dp(2),0,dp(2),0);b.setAutoSizeTextTypeUniformWithConfiguration(8,13,1,android.util.TypedValue.COMPLEX_UNIT_SP);b.setTag("chart-period:"+p);b.setContentDescription("切换"+ChartPeriod.label(p));periods.addView(b,new LinearLayout.LayoutParams(0,dp(44),1));periodButtons.put(p,b);b.setOnClickListener(v->choosePeriod(p));}
+        dailyButton=periodButtons.get(ChartPeriod.DAY);minuteButton=periodButtons.get(ChartPeriod.FIFTEEN);Ui.add(page,periods);Ui.gap(page,16);
         LinearLayout chartHeading=Ui.row(this);chartHeading.addView(text("K线与指标",20),new LinearLayout.LayoutParams(0,-2,1));chartHeading.addView(orientation.button(true),new LinearLayout.LayoutParams(dp(92),dp(40)));LinearLayout.LayoutParams chartTitleParams=new LinearLayout.LayoutParams(-1,-2);chartTitleParams.setMargins(dp(3),dp(14),dp(3),dp(12));page.addView(chartHeading,chartTitleParams);LinearLayout chartCard=Ui.card(page);chartCard.setPadding(dp(8),dp(10),dp(8),dp(10));
         HorizontalScrollView chooser=new HorizontalScrollView(this);chooser.setHorizontalScrollBarEnabled(false);
         LinearLayout choices=Ui.row(this);choices.setPadding(dp(4),dp(4),dp(4),dp(4));choices.setBackground(Ui.shape(this,Ui.BG,12));chooser.addView(choices);
@@ -101,96 +107,77 @@ public final class StockChartActivity extends Activity implements TraderApplicat
         for(int count:DAILY_RANGES){
             Button button=Ui.button(this,count+"日",false);button.setTag("daily-range:"+count);button.setSingleLine(true);button.setPadding(dp(4),dp(8),dp(4),dp(8));button.setAutoSizeTextTypeUniformWithConfiguration(10,13,1,android.util.TypedValue.COMPLEX_UNIT_SP);button.setContentDescription("查看最近"+count+"个交易日日K");
             rangeButtons.add(button);dailyRanges.addView(button,new LinearLayout.LayoutParams(0,dp(44),1));
-            button.setOnClickListener(v->{dailyRange=count;restoredViewport=null;chart.setVisibleCount(count);updateRanges();});
+            button.setOnClickListener(v->{dailyRange=count;ranges.put(period,count);restoredViewport=null;chart.setVisibleCount(count);updateRanges();});
         }
         Ui.gap(chartCard,8);Ui.add(chartCard,dailyRanges);updateRanges();
-        chart=new StockChartView(this);chart.setMinimumHeight(dp(480));
-        chartCard.addView(chart,new LinearLayout.LayoutParams(-1,dp(480)));
-        LinearLayout selected=Ui.card(page);selectedHeading=text(minuteMode?"所选15分钟":"所选交易日",12);Ui.add(selected,selectedHeading);Ui.gap(selected,9);detail=text("点选K线查看当天数据",13);detail.setMinHeight(dp(72));Ui.add(selected,detail);
+        LinearLayout selected=Ui.column(this);selected.setTag("bar-detail");selected.setPadding(dp(4),dp(10),dp(4),dp(8));selectedHeading=text(selectedTitle(),12);Ui.add(selected,selectedHeading);Ui.gap(selected,6);detail=text("点选K线查看数据",13);detail.setTag("bar-detail-text");Ui.add(selected,detail);Ui.add(chartCard,selected);
+        chart=new StockChartView(this);chart.setMinimumHeight(dp(480));chartCard.addView(chart,new LinearLayout.LayoutParams(-1,dp(480)));
         chart.setOnBarSelected(index->detail.setText(chart.detail(index)));
         TextView hint=text("左右拖动查看历史 · 双指缩放 · 点选K线查看指标",12);page.addView(hint);
         behaviorBox=Ui.column(this);Ui.add(page,behaviorBox);
         if(orientation.landscape()&&getResources().getConfiguration().orientation==android.content.res.Configuration.ORIENTATION_LANDSCAPE){
+            selectedHeading.setVisibility(View.GONE);selected.getChildAt(1).getLayoutParams().height=0;selected.setPadding(dp(4),dp(4),dp(4),dp(4));detail.setTextSize(11);detail.setLineSpacing(0,1);
             page.removeAllViews();page.setPadding(dp(12),dp(4),dp(12),dp(8));nav.setPadding(dp(12),dp(4),dp(12),0);navigation.setText(name+"  "+code);Ui.compact(navigation);
             ((android.view.ViewGroup)priceLabel.getParent()).removeView(priceLabel);priceLabel.setTextSize(16);nav.addView(priceLabel,2,new LinearLayout.LayoutParams(dp(80),dp(32)));
-            periods.removeView(dailyButton);periods.removeView(minuteButton);heading.removeView(favorite);
-            nav.addView(dailyButton,3,new LinearLayout.LayoutParams(dp(60),dp(36)));nav.addView(minuteButton,4,new LinearLayout.LayoutParams(dp(105),dp(36)));nav.addView(favorite,5,new LinearLayout.LayoutParams(dp(88),dp(36)));
+            heading.removeView(favorite);nav.addView(favorite,3,new LinearLayout.LayoutParams(dp(88),dp(36)));Ui.add(page,periods);
             int height=Math.max(240,getResources().getConfiguration().screenHeightDp-140);chart.setMinimumHeight(0);chart.getLayoutParams().height=dp(height);Ui.add(page,chartCard);
-            Ui.add(page,selected);Ui.add(page,holdings);Ui.add(page,quote);Ui.add(page,behaviorBox);
+            Ui.add(page,holdings);Ui.add(page,quote);Ui.add(page,behaviorBox);
         }
-        chart.setMinuteMode(minuteMode);Ui.segment(dailyButton,!minuteMode);Ui.segment(minuteButton,minuteMode);updateStop();renderBehaviors();refreshData();
+        chart.setPeriod(period);updatePeriodButtons();updateStop();renderBehaviors();refreshData();
     }
     @Override protected void onResume(){super.onResume();
         updateStop();
         if(chart!=null&&android.os.SystemClock.elapsedRealtime()-lastRefresh>=RefreshSchedule.INTERVAL_MS)refreshData();}
     @Override public void refreshData(){
-        if(chart==null||loading||stockCode==null)return;
-        loading=true;status.setText(minuteMode?"正在读取15分钟K线…":"正在读取日K…");int request=++generation;boolean minute=minuteMode;lastRefresh=android.os.SystemClock.elapsedRealtime();
-        new Thread(()->{try{load(stockCode,minute,request);}finally{runOnUiThread(()->{if(request==generation)loading=false;});}},"stock-chart-"+stockCode).start();
+        if(chart==null||loading||stockCode==null)return;loading=true;status.setText("正在读取"+ChartPeriod.label(period)+"…");int request=++generation,requested=period;lastRefresh=android.os.SystemClock.elapsedRealtime();
+        loader=new Thread(()->{try{load(stockCode,requested,request);}finally{runOnUiThread(()->{if(request==generation)loading=false;});}},"stock-chart-"+stockCode);loader.start();
     }
-    private void selectIndicator(int index){
-        for(int i=0;i<indicatorButtons.size();i++){
-            Button button=indicatorButtons.get(i);
-            boolean active=i==index;
-            Ui.segment(button,active);
-        }
+    private void selectIndicator(int index){for(int i=0;i<indicatorButtons.size();i++)Ui.segment(indicatorButtons.get(i),i==index);}
+    private void updatePeriodButtons(){for(Map.Entry<Integer,Button> b:periodButtons.entrySet())Ui.segment(b.getValue(),b.getKey()==period);}
+    private String selectedTitle(){return period==ChartPeriod.WEEK?"所选周 · 首日开盘 / 末日收盘":period==ChartPeriod.MONTH?"所选月 · 首日开盘 / 末日收盘":minuteMode?"所选"+period+"分钟":"所选交易日";}
+    private List<DailyBar> minuteRows(){return period==ChartPeriod.FIVE?fiveRows:minuteRows;}
+    private void choosePeriod(int chosen){
+        if(period==chosen)return;rememberViewport();if(loader!=null)loader.interrupt();generation++;loading=false;period=chosen;minuteMode=ChartPeriod.minute(chosen);dailyRange=ranges.getOrDefault(period,60);restoredViewport=viewports.get(chosen);chart.setPeriod(chosen);selectedHeading.setText(selectedTitle());detail.setText("点选K线查看数据");updatePeriodButtons();updateRanges();List<DailyBar> cached=minuteMode?minuteRows():dailyRows;if(!cached.isEmpty())showRows(cached);renderBehaviors();refreshData();
     }
-    private void choosePeriod(boolean minute){
-        if(minuteMode==minute)return;rememberViewport();generation++;loading=false;minuteMode=minute;restoredViewport=minute?minuteViewport:dailyViewport;chart.setMinuteMode(minute);selectedHeading.setText(minute?"所选15分钟":"所选交易日");detail.setText("点选K线查看数据");
-        Ui.segment(dailyButton,!minute);Ui.segment(minuteButton,minute);updateRanges();List<DailyBar> cached=minute?minuteRows:dailyRows;if(!cached.isEmpty())showRows(cached);renderBehaviors();refreshData();
-    }
-    private void updateRanges(){dailyRanges.setVisibility(minuteMode?View.GONE:View.VISIBLE);for(int i=0;i<rangeButtons.size();i++)Ui.segment(rangeButtons.get(i),dailyRange==DAILY_RANGES[i]);}
-    private void rememberViewport(){if(chart!=null&&chart.viewport()[0]>0){if(minuteMode)minuteViewport=chart.viewport();else dailyViewport=chart.viewport();}}
+    private void updateRanges(){dailyRanges.setVisibility(minuteMode?View.GONE:View.VISIBLE);for(int i=0;i<rangeButtons.size();i++){Button b=rangeButtons.get(i);b.setText(DAILY_RANGES[i]+ChartPeriod.unit(period));b.setContentDescription("查看最近"+DAILY_RANGES[i]+ChartPeriod.unit(period)+ChartPeriod.label(period));Ui.segment(b,dailyRange==DAILY_RANGES[i]);}}
+    private void rememberViewport(){if(chart!=null&&chart.viewport()[0]>0)viewports.put(period,chart.viewport());}
     private void showRows(List<DailyBar> rows){
-        boolean first=chart.viewport()[0]==0;chart.setBars(rows);
-        if(restoredViewport!=null){chart.restoreViewport(restoredViewport);selectIndicator(restoredViewport[3]);restoredViewport=null;}
-        else if(first)chart.setVisibleCount(minuteMode?50:dailyRange);
+        boolean first=chart.viewport()[0]==0;ChartPeriod.Series series=minuteMode?null:ChartPeriod.aggregate(rows,period);if(series!=null)chart.setPeriodSpans(series.spans);chart.setBars(series==null?rows:series.bars);
+        if(restoredViewport!=null){chart.restoreViewport(restoredViewport);selectIndicator(restoredViewport[3]);restoredViewport=null;}else if(first)chart.setVisibleCount(minuteMode?50:dailyRange);
     }
-    @Override protected void onSaveInstanceState(Bundle state){if(orientation!=null)orientation.save(state);state.putBoolean("minute",minuteMode);rememberViewport();if(chart!=null)state.putIntArray("chart_viewport",restoredViewport!=null?restoredViewport:chart.viewport());state.putInt("daily_range",dailyRange);state.putIntArray("daily_viewport",dailyViewport);state.putIntArray("minute_viewport",minuteViewport);super.onSaveInstanceState(state);}
-    @Override protected void onDestroy(){generation++;super.onDestroy();}
+    @Override protected void onSaveInstanceState(Bundle state){if(orientation!=null)orientation.save(state);state.putBoolean("minute",minuteMode);state.putInt("chart_period",period);rememberViewport();if(chart!=null)state.putIntArray("chart_viewport",restoredViewport!=null?restoredViewport:chart.viewport());state.putInt("daily_range",dailyRange);for(int p:new int[]{0,5,15,7,30}){state.putIntArray("viewport:"+p,viewports.get(p));state.putInt("range:"+p,ranges.getOrDefault(p,60));}super.onSaveInstanceState(state);}
+    @Override protected void onDestroy(){generation++;if(loader!=null)loader.interrupt();super.onDestroy();}
     private void updateStop(){if(chart==null||stockCode==null)return;try{
         org.json.JSONObject h=HoldingsStore.find(this,stockCode);double stop=h==null?Double.NaN:h.optDouble("stop_price",Double.NaN);chart.setStopPrice(stop);
         holdingButton.setText(h==null?"＋ 持仓":"设置止损");
-        List<DailyBar> rows=minuteMode?minuteRows:dailyRows;org.json.JSONObject quote=rows.isEmpty()?null:new org.json.JSONObject().put("latest_price",rows.get(rows.size()-1).close);
+        List<DailyBar> rows=minuteMode?minuteRows():dailyRows;org.json.JSONObject quote=rows.isEmpty()?null:new org.json.JSONObject().put("latest_price",rows.get(rows.size()-1).close);
         stopLabel.setText(h==null?"加入持仓后可设置止损线":HoldingsStore.stopText(h,quote));stopLabel.setTextColor(quote!=null&&quote.optDouble("latest_price")<=stop?Ui.RED:Ui.SECONDARY);
     }catch(Exception e){stopLabel.setText("止损线读取失败");}}
     private void renderBehaviors(){
         if(behaviorBox==null)return;behaviorBox.removeAllViews();behaviorBox.setVisibility(minuteMode?View.VISIBLE:View.GONE);if(!minuteMode)return;
         Ui.section(behaviorBox,"主力行为框选","基于量价推测");LinearLayout card=Ui.card(behaviorBox);
         List<MinuteBehavior.Zone> zones=chart.behaviorZones();Ui.add(card,text("放量≥20交易日中位数×2.5 · 全部框选",13));Ui.gap(card,5);Ui.add(card,text("红框进攻 · 绿框减仓 · 黄框持平 · 包含框虚线",12));Ui.gap(card,10);
-        Button rules=Ui.button(this,"查看框选规则",false);rules.setOnClickListener(v->new android.app.AlertDialog.Builder(this).setTitle("主力行为 · 量价推测").setMessage(MinuteBehavior.RULES).setPositiveButton("知道了",null).show());Ui.add(card,rules);
-        if(minuteRows.isEmpty()){Ui.add(card,text("15分钟数据尚未就绪",13));return;}
+        Button rules=Ui.button(this,"查看框选规则",false);rules.setOnClickListener(v->new android.app.AlertDialog.Builder(this).setTitle("主力行为 · 量价推测").setMessage(MinuteBehavior.rules(period)).setPositiveButton("知道了",null).show());Ui.add(card,rules);
+        List<DailyBar> current=minuteRows();if(current.isEmpty()){Ui.add(card,text(period+"分钟数据尚未就绪",13));return;}
         if(!chart.behaviorBaselineReady()){Ui.gap(card,10);Ui.add(card,text("当前日前不足20个完整交易日或基准为0，暂无放量判断，请刷新补齐历史。",13));}
         if(zones.isEmpty()){Ui.gap(card,10);Ui.add(card,text("有基准的历史范围未发现达到2.5倍中位量的区间",13));return;}
         Ui.gap(card,8);Ui.add(card,text("共 "+zones.size()+"个区间 · 点选定位（显示最近12个）",12));
-        for(int i=zones.size()-1;i>=Math.max(0,zones.size()-12);i--){MinuteBehavior.Zone z=zones.get(i);Ui.line(card);TextView item=Ui.text(this,(i+1)+"  "+z.label()+"\n"+z.description(minuteRows),13,z.kind==MinuteBehavior.VOLUME?Ui.AMBER:z.attack?Ui.RED:Ui.GREEN,true);item.setMinHeight(dp(48));item.setOnClickListener(v->chart.focus(z.end));Ui.add(card,item);}
+        for(int i=zones.size()-1;i>=Math.max(0,zones.size()-12);i--){MinuteBehavior.Zone z=zones.get(i);Ui.line(card);TextView item=Ui.text(this,(i+1)+"  "+z.label()+"\n"+z.description(current),13,z.kind==MinuteBehavior.VOLUME?Ui.AMBER:z.attack?Ui.RED:Ui.GREEN,true);item.setMinHeight(dp(48));item.setOnClickListener(v->chart.focus(z.end));Ui.add(card,item);}
     }
-    private void load(String code,boolean minute,int request){
-        List<DailyBar> rows=null;String source="腾讯最新行情";Exception failure=null;
-        if(minute){
-            try{rows=TencentClient.minutes(code);MinuteCache.save(this,code,rows);}catch(Exception e){failure=e;}
-            if(rows==null||rows.isEmpty())try{rows=MinuteCache.load(this,code);source="本机缓存（更新失败）";}catch(Exception ignored){}
-        }else{
-            DailyHistoryCache cache=new DailyHistoryCache(this);
-            try{TencentClient.Quote q=TencentClient.quote(code);rows=cache.load(q,q.today.date,DAILY_HISTORY_BARS);}catch(Exception e){failure=e;}
-            if(rows==null||rows.isEmpty())try{rows=cache.cached(code);source="本机缓存（更新失败）";}catch(Exception ignored){}
-            if(rows==null||rows.isEmpty())try{rows=TencentClient.history(code,"9999-12-31",DAILY_HISTORY_BARS);source="腾讯历史日K";}catch(Exception e){failure=e;}
+    private void load(String code,int requested,int request){
+        boolean minute=ChartPeriod.minute(requested);List<DailyBar> rows=null;String source=minute?(requested==5?"新浪 / 东方财富备用 · 不复权":"腾讯不复权")+" · 可用分钟历史":"腾讯不复权 · 完整日K历史";Exception failure=null;
+        if(minute){try{List<DailyBar> fresh=TencentClient.minutes(code,requested);if(Thread.currentThread().isInterrupted())return;MinuteCache.save(this,code,requested,fresh);rows=MinuteCache.load(this,code,requested);}catch(Exception e){failure=e;}
+            if(Thread.currentThread().isInterrupted())return;if(rows==null||rows.isEmpty())try{rows=MinuteCache.load(this,code,requested);source="本机分钟历史（更新失败）";}catch(Exception ignored){}
+        }else {DailyHistoryCache cache=new DailyHistoryCache(this);try{TencentClient.Quote q=TencentClient.quote(code);rows=cache.loadFull(code,q.today.date,q,message->runOnUiThread(()->{if(request==generation&&!isDestroyed())status.setText(message);}));}catch(Exception e){failure=e;}
+            if(Thread.currentThread().isInterrupted())return;if(rows==null||rows.isEmpty())try{rows=cache.cached(code);source=cache.complete(code)?"完整日K缓存（更新失败）":"可用日K缓存 · 全历史同步未完成";}catch(Exception ignored){}
+            if(rows==null||rows.isEmpty())try{rows=cache.loadFull(code,java.time.LocalDate.now(MinuteBehavior.ZONE).toString(),null,null);source="腾讯不复权 · 完整日K历史";}catch(Exception e){failure=e;}
         }
-        TreeMap<String,DailyBar> sorted=new TreeMap<>();if(rows!=null)for(DailyBar b:rows)if(b.open>0&&b.high>0&&b.low>0&&b.close>0)sorted.put(b.date,b);
-        if(!minute&&!sorted.isEmpty()){
-            String start=java.time.LocalDate.parse(sorted.lastKey()).minusYears(2).toString();
-            sorted.headMap(start,false).clear();
-        }
-        List<DailyBar> ready=new ArrayList<>(sorted.values());String label=source;Exception error=failure;
-        runOnUiThread(()->{
-            if(isFinishing()||isDestroyed()||request!=generation||minute!=minuteMode)return;
-            if(ready.isEmpty()){status.setText((minute?"15分钟K线":"日K")+"读取失败："+(error==null?"数据为空":error.getMessage())+"；已有图表保留");return;}
-            List<DailyBar> target=minute?minuteRows:dailyRows;target.clear();target.addAll(ready);
-            DailyBar last=ready.get(ready.size()-1);priceLabel.setText(String.format(Locale.CHINA,"%.2f",last.close));
-            double base=minute?last.open:ready.size()>1?ready.get(ready.size()-2).close:Double.NaN;double change=(last.close/base-1)*100;
-            changeLabel.setText(String.format(Locale.CHINA,"%s %+.2f%% · %s",minute?"本根涨跌":"日涨幅",change,last.date));changeLabel.setTextColor(change>=0?Ui.RED:Ui.GREEN);
-            status.setText(label+" · "+last.date+" · "+ready.size()+"根"+(minute?"15分钟K线":"日K")+(minute&&MinuteBehavior.epoch(last.date)>System.currentTimeMillis()?" · 末根未结束":""));
-            showRows(ready);if(minute&&focusTime!=null){for(int i=0;i<ready.size();i++)if(focusTime.equals(ready.get(i).date)){chart.focus(i);break;}focusTime=null;}updateStop();renderBehaviors();
+        TreeMap<String,DailyBar> sorted=new TreeMap<>();if(rows!=null)for(DailyBar b:rows)if(b.open>0&&b.high>0&&b.low>0&&b.close>0)sorted.put(b.date,b);List<DailyBar> ready=new ArrayList<>(sorted.values());String label=source;Exception error=failure;
+        runOnUiThread(()->{if(isFinishing()||isDestroyed()||request!=generation||requested!=period)return;if(ready.isEmpty()){status.setText(ChartPeriod.label(requested)+"读取失败："+(error==null?"数据为空":error.getMessage())+"；已有图表保留");return;}
+            List<DailyBar> target=minute?minuteRows():dailyRows;target.clear();target.addAll(ready);List<DailyBar> displayed=minute?ready:ChartPeriod.aggregate(ready,requested).bars;DailyBar last=displayed.get(displayed.size()-1);priceLabel.setText(String.format(Locale.CHINA,"%.2f",last.close));double base=minute?last.open:displayed.size()>1?displayed.get(displayed.size()-2).close:Double.NaN;double change=(last.close/base-1)*100;
+            changeLabel.setText(String.format(Locale.CHINA,"%s %+.2f%% · %s",minute?"本根涨跌":requested==7?"本周涨幅":requested==30?"本月涨幅":"日涨幅",change,last.date));changeLabel.setTextColor(change>=0?Ui.RED:Ui.GREEN);
+            status.setText(label+"\n"+ready.get(0).date+"—"+ready.get(ready.size()-1).date+" · "+displayed.size()+"根"+ChartPeriod.label(requested)+(minute?" · 持续积累本机历史":"")+(error==null?"":" · "+error.getMessage()));
+            showRows(ready);if(requested==15&&focusTime!=null){for(int i=0;i<ready.size();i++)if(focusTime.equals(ready.get(i).date)){chart.focus(i);break;}focusTime=null;}updateStop();renderBehaviors();
         });
     }
 }

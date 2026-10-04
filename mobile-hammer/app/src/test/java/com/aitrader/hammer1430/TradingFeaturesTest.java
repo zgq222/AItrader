@@ -28,12 +28,18 @@ public class TradingFeaturesTest {
     @Implements(value=TencentClient.class,isInAndroidSdk=false)
     public static class FakeTencent {
         @Implementation protected static List<DailyBar> minutes(String code)throws Exception {if(entered!=null){entered.countDown();release.await(3,TimeUnit.SECONDS);}if(failMinutes)throw new IOException("测试离线");return behaviorBars();}
+        @Implementation protected static List<DailyBar> minutes(String code,int interval)throws Exception{return minutes(code);}
+        @Implementation protected static List<DailyBar> fullHistory(String code,String date,TencentClient.Progress progress){return daily();}
         @Implementation protected static TencentClient.Quote quote(String code){List<DailyBar> d=daily();DailyBar b=d.get(d.size()-1);return new TencentClient.Quote(code,"测试股票",b,10,MinuteBehavior.epoch(b.date+" 15:00")/1000);}
         @Implementation protected static List<DailyBar> history(String code,String date){return daily();}
         @Implementation protected static List<DailyBar> history(String code,String date,int count){return daily();}
         @Implementation protected static List<DailyBar> indexHistory(String date){return daily();}
         @Implementation protected static TencentClient.Quote indexQuote(){return quote("600519");}
         @Implementation protected static List<TencentClient.Quote> quotes(List<String> codes){List<TencentClient.Quote> out=new ArrayList<>();for(String c:codes)out.add(quote(c));return out;}
+    }
+    @Implements(value=BoardHistoryClient.class,isInAndroidSdk=false)
+    public static class FakeBoard {
+        @Implementation protected static JSONObject sync(Context c,String code,boolean concept,TencentClient.Progress progress)throws Exception{return BoardHistoryClient.cached(c,code,concept);}
     }
     @Before public void reset(){Context c=RuntimeEnvironment.getApplication();for(String pref:new String[]{"holdings","watchlist","minute_cache","minute15_cache","scan"})c.getSharedPreferences(pref,0).edit().clear().commit();failMinutes=false;entered=null;release=null;}
     static List<DailyBar> daily(){List<DailyBar> out=new ArrayList<>();for(int i=0;i<40;i++)out.add(new DailyBar(LocalDate.of(2026,1,1).plusDays(i).toString(),10,10.2,9.8,10+i*.002,100));return out;}
@@ -66,6 +72,7 @@ public class TradingFeaturesTest {
         a.put(new JSONArray("[\"202609301455\",1,1,1,1,1]"));a.put(new JSONArray("[\"202609300930\",1,1,1,1,1]"));a.put(new JSONArray("[\"202609301300\",1,1,1,1,1]"));assertEquals(320,TencentClient.parseMinutes(root.toString(),"sh600519").size());
         // Upgrade must never present a saved 5-minute series as 15-minute data.
         c.getSharedPreferences("minute15_cache",0).edit().clear().commit();
+        new File(c.getFilesDir(),"minute_history_v2/15/600519.json").delete();
         c.getSharedPreferences("minute_cache",0).edit().putString("600519","[[\"2026-09-30 14:55\",1,1,1,1,1]]").commit();assertTrue(MinuteCache.load(c,"600519").isEmpty());
         String old;try(InputStream in=getClass().getResourceAsStream("/minute_live.json")){old=new String(in.readAllBytes(),StandardCharsets.UTF_8);}
         try{TencentClient.parseMinutes(old,"sh600519");fail("5-minute response must be rejected");}catch(IOException expected){}
@@ -118,7 +125,7 @@ public class TradingFeaturesTest {
         try{StockChartActivity a=controller.get();View r=root(a);StockChartView chart=chart(r);awaitChart(chart,false);assertTrue(chart.behaviorZones().isEmpty());
             named(r,"15分钟K线").performClick();awaitChart(chart,true);assertEquals(2,chart.behaviorZones().size());assertNotNull(named(r,"主力行为框选"));snapshot(r,a,"apk-v1.23-stock-minute-page.png",390,844);
             snapshot(chart,a,"apk-v1.23-minute-chart.png",358,480);assertTrue(chart.detail(ATTACK_INDEX).contains("主力进攻"));assertTrue(chart.detail(REDUCE_INDEX).contains("主力减仓"));chart.focus(ATTACK_INDEX);assertNotNull(named(r,"查看框选规则"));
-            failMinutes=true;a.refreshData();long until=System.nanoTime()+TimeUnit.SECONDS.toNanos(5);while(System.nanoTime()<until){Shadows.shadowOf(Looper.getMainLooper()).idle();if(contains(r,"本机缓存（更新失败）"))break;Thread.sleep(10);}assertTrue(contains(r,"本机缓存（更新失败）"));assertEquals(2,chart.behaviorZones().size());
+            failMinutes=true;a.refreshData();long until=System.nanoTime()+TimeUnit.SECONDS.toNanos(5);while(System.nanoTime()<until){Shadows.shadowOf(Looper.getMainLooper()).idle();if(contains(r,"本机分钟历史（更新失败）"))break;Thread.sleep(10);}assertTrue(contains(r,"本机分钟历史（更新失败）"));assertEquals(2,chart.behaviorZones().size());
             named(r,"日K").performClick();awaitChart(chart,false);assertTrue(chart.behaviorZones().isEmpty());
             failMinutes=false;entered=new CountDownLatch(1);release=new CountDownLatch(1);named(r,"15分钟K线").performClick();assertTrue(entered.await(2,TimeUnit.SECONDS));named(r,"日K").performClick();release.countDown();awaitChart(chart,false);assertTrue("late minute response cannot overwrite daily candles",chart.detail(0).contains("2026-01-01"));
         }finally{if(release!=null)release.countDown();controller.pause().stop().destroy();}
