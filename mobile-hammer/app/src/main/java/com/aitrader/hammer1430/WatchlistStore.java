@@ -85,7 +85,14 @@ final class WatchlistStore {
             return new JSONObject(output.toString(StandardCharsets.UTF_8.name()));
         }
     }
-    static void importBundled(Context context)throws Exception{importSnapshot(context,bundledSnapshot(context));}
+    static synchronized void importBundled(Context context)throws Exception{
+        android.content.SharedPreferences prefs=context.getSharedPreferences(PREFS,Context.MODE_PRIVATE);
+        if(prefs.getBoolean("initial_seed_done",false))return;
+        boolean existing=prefs.contains(KEY);for(String key:prefs.getAll().keySet())if(key.startsWith("imported:")&&prefs.getBoolean(key,false))existing=true;
+        // Existing phone lists, even an intentionally empty list, always remain authoritative on upgrade.
+        if(existing){if(!prefs.edit().putBoolean("initial_seed_done",true).commit())throw new IOException("自选升级状态保存失败");return;}
+        importSnapshot(context,bundledSnapshot(context));
+    }
     static synchronized boolean importSnapshot(Context context,JSONObject snapshot)throws Exception{
         String id=snapshot.getString("id");if(id.isEmpty())throw new IOException("导入名单缺少标识");
         android.content.SharedPreferences prefs=context.getSharedPreferences(PREFS,Context.MODE_PRIVATE);
@@ -103,7 +110,7 @@ final class WatchlistStore {
             if(source.optBoolean("starred",false))item.put("starred",true);
         }
         JSONArray result=new JSONArray();for(JSONObject item:merged.values())result.put(item);
-        if(!prefs.edit().putString(KEY,result.toString()).putBoolean(marker,true).commit())throw new IOException("网页名单导入保存失败，下次打开会重试");
+        if(!prefs.edit().putString(KEY,result.toString()).putBoolean(marker,true).putBoolean("initial_seed_done",true).commit())throw new IOException("网页名单导入保存失败，下次打开会重试");
         return true;
     }
     static String industry(JSONObject item,Function<String,String> lookup){

@@ -1,13 +1,33 @@
 package com.aitrader.hammer1430;
 
 import android.app.*;
+import android.content.SharedPreferences;
+import android.view.*;
 import android.text.InputType;
 import android.widget.*;
 import org.json.*;
 import java.util.*;
 
 final class NotesDialogs {
-    static Button button(Activity a,String key,String name,String code,Runnable changed){Button b=Ui.button(a,"笔记",false);b.setTag("notes:"+key);b.setTextSize(12);b.setPadding(Ui.dp(a,3),0,Ui.dp(a,3),0);b.setContentDescription(name+"添加或查看笔记");b.setOnClickListener(v->show(a,key,name,code,changed));return b;}
+    static final class NoteButton extends FrameLayout {
+        private final String key,name;
+        private int count;
+        private final Button label;
+        private final TextView badge;
+        private boolean compact;
+        private final SharedPreferences.OnSharedPreferenceChangeListener listener=(p,k)->post(this::refresh);
+        NoteButton(Activity a,String key,String name){super(a);this.key=key;this.name=name;setTag("notes:"+key);setClickable(true);setFocusable(true);setImportantForAccessibility(View.IMPORTANT_FOR_ACCESSIBILITY_YES);
+            label=Ui.button(a,"笔记",false);label.setSingleLine(true);label.setAutoSizeTextTypeUniformWithConfiguration(9,12,1,android.util.TypedValue.COMPLEX_UNIT_SP);label.setImportantForAccessibility(View.IMPORTANT_FOR_ACCESSIBILITY_NO);label.setOnClickListener(v->performClick());addView(label,new FrameLayout.LayoutParams(-1,-1));
+            badge=Ui.text(a,"",8,android.graphics.Color.WHITE,true);badge.setTextSize(android.util.TypedValue.COMPLEX_UNIT_DIP,8);badge.setGravity(Gravity.CENTER);badge.setMinWidth(Ui.dp(a,14));badge.setPadding(Ui.dp(a,3),0,Ui.dp(a,3),0);badge.setBackground(Ui.shape(a,Ui.RED,7));badge.setImportantForAccessibility(View.IMPORTANT_FOR_ACCESSIBILITY_NO);FrameLayout.LayoutParams p=new FrameLayout.LayoutParams(-2,Ui.dp(a,14),Gravity.TOP|Gravity.END);p.setMargins(0,Ui.dp(a,1),Ui.dp(a,1),0);addView(badge,p);refresh();}
+        void compact(){compact=true;label.setMinHeight(Ui.dp(getContext(),30));label.setMinimumHeight(Ui.dp(getContext(),30));refresh();}
+        int noteCount(){return count;}
+        String badgeText(){return count>99?"99+":String.valueOf(count);}
+        void refresh(){try{count=NotesStore.notes(getContext(),key).length();if(key.startsWith("stock:"))for(JSONObject cycle:TradeJournal.forStock(getContext(),key.substring(6)))count+=cycle.getJSONArray("buy_notes").length()+cycle.getJSONArray("sell_notes").length();}catch(Exception e){count=0;}
+            badge.setText(badgeText());badge.setVisibility(count>0?View.VISIBLE:View.GONE);label.setPadding(Ui.dp(getContext(),3),compact&&count>0?Ui.dp(getContext(),14):0,Ui.dp(getContext(),3),0);setContentDescription(name+"添加或查看笔记，共"+count+"条");}
+        @Override protected void onAttachedToWindow(){super.onAttachedToWindow();getContext().getSharedPreferences(NotesStore.PREFS,0).registerOnSharedPreferenceChangeListener(listener);getContext().getSharedPreferences("holdings",0).registerOnSharedPreferenceChangeListener(listener);refresh();}
+        @Override protected void onDetachedFromWindow(){getContext().getSharedPreferences(NotesStore.PREFS,0).unregisterOnSharedPreferenceChangeListener(listener);getContext().getSharedPreferences("holdings",0).unregisterOnSharedPreferenceChangeListener(listener);super.onDetachedFromWindow();}
+    }
+    static NoteButton button(Activity a,String key,String name,String code,Runnable changed){NoteButton b=new NoteButton(a,key,name);b.setOnClickListener(v->show(a,key,name,code,()->{b.refresh();changed.run();}));return b;}
     private static EditText input(Activity a,String hint){EditText v=new EditText(a);v.setInputType(InputType.TYPE_CLASS_TEXT|InputType.TYPE_TEXT_FLAG_MULTI_LINE);v.setMinLines(3);v.setMaxLines(6);v.setHint(hint);v.setTextSize(15);return v;}
     private static LinearLayout content(Activity a){LinearLayout c=Ui.column(a);c.setPadding(Ui.dp(a,20),Ui.dp(a,8),Ui.dp(a,20),Ui.dp(a,12));return c;}
     static void history(LinearLayout body,JSONArray rows,String empty)throws Exception {body.removeAllViews();if(rows.length()==0)Ui.add(body,Ui.text(body.getContext(),empty,13,Ui.SECONDARY,false));for(int i=0;i<rows.length();i++){if(i>0)Ui.gap(body,10);TextView text=Ui.text(body.getContext(),NotesStore.line(rows.getJSONObject(i)),14,Ui.INK,false);text.setTextIsSelectable(true);Ui.add(body,text);}}
