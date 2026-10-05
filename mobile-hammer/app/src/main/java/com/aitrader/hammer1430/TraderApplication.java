@@ -17,6 +17,7 @@ public final class TraderApplication extends Application implements Application.
     private Activity current;
     private boolean opened;
     private final Runnable tick=()->refreshIfDue();
+    private final SharedPreferences.OnSharedPreferenceChangeListener holdingsChanged=(p,k)->{if("stocks".equals(k))handler.post(()->{if(current!=null)HoldingLiveService.ensure(this);});};
     @Override public void onCreate(){super.onCreate();registerActivityLifecycleCallbacks(this);
         SharedPreferences prefs=getSharedPreferences("scan",MODE_PRIVATE);
         SharedPreferences.Editor edit=prefs.edit().remove("groups_cache").remove("groups_payload").remove("cache_rule_version");
@@ -24,6 +25,8 @@ public final class TraderApplication extends Application implements Application.
         edit.apply();
         android.app.NotificationManager manager=(android.app.NotificationManager)getSystemService(NOTIFICATION_SERVICE);
         manager.cancel(1431);manager.deleteNotificationChannel("hammer_results");
+        HoldingLive.prefs(this).edit().putBoolean("speech_active",false).putString("speech_status","").remove("speech_until").apply();
+        getSharedPreferences("holdings",MODE_PRIVATE).registerOnSharedPreferenceChangeListener(holdingsChanged);
     }
     private void refreshIfDue(){
         handler.removeCallbacks(tick);
@@ -32,6 +35,7 @@ public final class TraderApplication extends Application implements Application.
         if(!opened||schedule.automaticDue(now,System.currentTimeMillis())){
             opened=true;
             schedule.started(now);
+            HoldingLiveService.ensure(this);
             MarketDataRepository.refresh(this);
             try{PersonalSignalService.refresh(this);}catch(RuntimeException error){PersonalSignalStore.prefs(this).edit().putString("error","信号检查未启动："+error.getMessage()).apply();}
             if(!ScreenService.isRunning())try{startForegroundService(new Intent(this,ScreenService.class));}
@@ -40,7 +44,7 @@ public final class TraderApplication extends Application implements Application.
         }
         handler.postDelayed(tick,schedule.automaticDelay(SystemClock.elapsedRealtime(),System.currentTimeMillis()));
     }
-    @Override public void onActivityResumed(Activity activity){current=activity;refreshIfDue();}
+    @Override public void onActivityResumed(Activity activity){current=activity;HoldingLiveService.ensure(this);refreshIfDue();}
     @Override public void onActivityPaused(Activity activity){if(current==activity){current=null;handler.removeCallbacks(tick);}}
     @Override public void onActivityCreated(Activity activity,Bundle state){}
     @Override public void onActivityStarted(Activity activity){}

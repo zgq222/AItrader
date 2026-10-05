@@ -18,7 +18,7 @@ import java.util.HashMap;
 
 /** Stock detail using the APK's existing daily price source and shared cache. */
 public final class StockChartActivity extends Activity implements TraderApplication.Refreshable {
-    static final String EXTRA_CODE="stock_code",EXTRA_NAME="stock_name",EXTRA_MINUTE="open_minute",EXTRA_FOCUS="focus_bar_time";
+    static final String EXTRA_CODE="stock_code",EXTRA_NAME="stock_name",EXTRA_MINUTE="open_minute",EXTRA_FOCUS="focus_bar_time",EXTRA_PERIOD="open_chart_period";
     private final ArrayList<Button> indicatorButtons=new ArrayList<>();
     private final ArrayList<Button> rangeButtons=new ArrayList<>();
     private static final int[] DAILY_RANGES={30,60,120,240};
@@ -53,9 +53,9 @@ public final class StockChartActivity extends Activity implements TraderApplicat
         if(code==null||!code.matches("\\d{6}")){finish();return;}
         if(name==null||name.isEmpty())name=code;
         stockCode=code;stockName=name;minuteMode=state!=null?state.getBoolean("minute",false):getIntent().getBooleanExtra(EXTRA_MINUTE,false);restoredViewport=state==null?null:state.getIntArray("chart_viewport");focusTime=state==null?getIntent().getStringExtra(EXTRA_FOCUS):null;
-        period=state==null?(minuteMode?ChartPeriod.FIFTEEN:ChartPeriod.DAY):state.getInt("chart_period",minuteMode?ChartPeriod.FIFTEEN:ChartPeriod.DAY);minuteMode=ChartPeriod.minute(period);
+        period=state==null?getIntent().getIntExtra(EXTRA_PERIOD,minuteMode?ChartPeriod.FIFTEEN:ChartPeriod.DAY):state.getInt("chart_period",minuteMode?ChartPeriod.FIFTEEN:ChartPeriod.DAY);minuteMode=ChartPeriod.minute(period);
         if(state!=null){for(int p:new int[]{0,5,15,7,30}){viewports.put(p,state.getIntArray("viewport:"+p));ranges.put(p,state.getInt("range:"+p,60));}dailyRange=ranges.getOrDefault(period,60);}
-        if(getIntent().getBooleanExtra("holding_risk",false))try{PersonalSignalStore.acknowledge(this,code);}catch(Exception ignored){}
+        if(getIntent().getBooleanExtra("holding_risk",false))try{if(getIntent().getIntExtra("holding_risk_period",15)==5)HoldingFiveStore.acknowledge(this,code);else PersonalSignalStore.acknowledge(this,code);}catch(Exception ignored){}
         LinearLayout root=Ui.column(this);setContentView(root);Ui.install(this,root);
         ScrollView scroll=new ScrollView(this);scroll.setTag("chart-scroll");scroll.setFillViewport(true);root.addView(scroll,new LinearLayout.LayoutParams(-1,0,1));
         LinearLayout page=new LinearLayout(this);page.setOrientation(LinearLayout.VERTICAL);
@@ -177,7 +177,7 @@ public final class StockChartActivity extends Activity implements TraderApplicat
             List<DailyBar> target=minute?minuteRows():dailyRows;target.clear();target.addAll(ready);List<DailyBar> displayed=minute?ready:ChartPeriod.aggregate(ready,requested).bars;DailyBar last=displayed.get(displayed.size()-1);priceLabel.setText(String.format(Locale.CHINA,"%.2f",last.close));double base=minute?last.open:displayed.size()>1?displayed.get(displayed.size()-2).close:Double.NaN;double change=(last.close/base-1)*100;
             changeLabel.setText(String.format(Locale.CHINA,"%s %+.2f%% · %s",minute?"本根涨跌":requested==7?"本周涨幅":requested==30?"本月涨幅":"日涨幅",change,last.date));changeLabel.setTextColor(change>=0?Ui.RED:Ui.GREEN);
             status.setText(label+"\n"+ready.get(0).date+"—"+ready.get(ready.size()-1).date+" · "+displayed.size()+"根"+ChartPeriod.label(requested)+(minute?" · 持续积累本机历史":"")+(error==null?"":" · "+error.getMessage()));
-            showRows(ready);if(requested==15&&focusTime!=null){for(int i=0;i<ready.size();i++)if(focusTime.equals(ready.get(i).date)){chart.focus(i);break;}focusTime=null;}updateStop();renderBehaviors();
+            showRows(ready);if(ChartPeriod.minute(requested)&&focusTime!=null){for(int i=0;i<ready.size();i++)if(focusTime.equals(ready.get(i).date)){chart.focus(i);break;}focusTime=null;}updateStop();renderBehaviors();
         });
     }
 }

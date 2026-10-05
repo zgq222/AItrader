@@ -161,6 +161,11 @@ final class TencentClient {
             double o=r.getDouble("open"),h=r.getDouble("high"),l=r.getDouble("low"),c=r.getDouble("close"),v=r.getDouble("volume");if(!Double.isFinite(o)||!Double.isFinite(h)||!Double.isFinite(l)||!Double.isFinite(c)||!Double.isFinite(v)||l<=0||v<0||h<Math.max(o,c)||l>Math.min(o,c))continue;sorted.put(time,new DailyBar(time,o,h,l,c,v));
         }catch(Exception ignored){}if(sorted.isEmpty())throw new IOException("5分钟K线为空或格式无效");return new ArrayList<>(sorted.values());
     }
+    static List<DailyBar> recentFiveMinutes(String code)throws Exception {
+        if(!code.matches("\\d{6}"))throw new IOException("股票代码无效");
+        try{return parseSinaFive(new String(get("https://money.finance.sina.com.cn/quotes_service/api/json_v2.php/CN_MarketData.getKLineData?symbol="+symbol(code)+"&scale=5&ma=no&datalen=64"),StandardCharsets.UTF_8));}
+        catch(Exception error){if(error instanceof InterruptedException||Thread.currentThread().isInterrupted())throw error;return minutes(code,5);}
+    }
     static List<DailyBar> parseFiveMinutes(String raw,String code)throws Exception {
         JSONObject root=new JSONObject(raw),data=root.optJSONObject("data");if(root.optInt("rc",-1)!=0||data==null||!code.equals(data.optString("code")))throw new IOException("5分钟K线数据不可用");
         JSONArray values=data.optJSONArray("klines");if(values==null)throw new IOException("5分钟K线为空");TreeMap<String,DailyBar> sorted=new TreeMap<>();
